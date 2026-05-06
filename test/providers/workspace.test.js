@@ -4,6 +4,7 @@ import path from 'node:path'
 import { expect } from 'chai'
 import esmock from 'esmock'
 
+import { discoverGradleSubprojects } from '../../src/providers/java_gradle.js'
 import { discoverMavenModules } from '../../src/providers/java_maven.js'
 import {
 	discoverWorkspaceCrates,
@@ -189,13 +190,83 @@ suite('discoverWorkspaceCrates', () => {
 	})
 })
 
+
+suite('discoverGradleSubprojects', () => {
+	test('returns empty when no settings.gradle at root', async () => {
+		const result = await discoverGradleSubprojects('test/providers/tst_manifests/npm')
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(0)
+	})
+
+	test('discovers multi-project build', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_multi_project')
+		const result = await discoverGradleSubprojects(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(3)
+		expect(result[0]).to.equal(path.join(root, 'build.gradle'))
+		expect(result.some(p => p.includes(path.join('app', 'build.gradle')))).to.be.true
+		expect(result.some(p => p.includes(path.join('lib', 'build.gradle')))).to.be.true
+	}).timeout(40000)
+
+	test('discovers nested subprojects', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_nested_subprojects')
+		const result = await discoverGradleSubprojects(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(3)
+		expect(result[0]).to.equal(path.join(root, 'build.gradle'))
+		expect(result.some(p => p.includes(path.join('libs', 'core', 'build.gradle')))).to.be.true
+		expect(result.some(p => p.includes(path.join('libs', 'util', 'build.gradle')))).to.be.true
+	}).timeout(40000)
+
+	test('handles mixed Groovy and Kotlin build files', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_mixed_variants')
+		const result = await discoverGradleSubprojects(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(3)
+		expect(result[0]).to.equal(path.join(root, 'build.gradle.kts'))
+		expect(result.some(p => p.endsWith(path.join('app', 'build.gradle')))).to.be.true
+		expect(result.some(p => p.endsWith(path.join('lib', 'build.gradle.kts')))).to.be.true
+	}).timeout(40000)
+
+	test('returns root only when no subprojects', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_no_subprojects')
+		const result = await discoverGradleSubprojects(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(1)
+		expect(result[0]).to.equal(path.join(root, 'build.gradle'))
+	}).timeout(40000)
+
+	test('returns root build file when gradle is not available', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_multi_project')
+		const { discoverGradleSubprojects: discoverMocked } = await esmock('../../src/providers/java_gradle.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => '/nonexistent/gradle',
+				getWrapperPreference: () => false,
+				invokeCommand: () => { throw Object.assign(new Error('gradle not found'), { code: 'ENOENT' }) },
+			},
+		})
+		const result = await discoverMocked(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(1)
+		expect(result[0]).to.equal(path.join(root, 'build.gradle'))
+	})
+
+	test('excludes paths matching workspaceDiscoveryIgnore', async () => {
+		const root = path.resolve('test/providers/tst_manifests/gradle/gradle_multi_project')
+		const result = await discoverGradleSubprojects(root, {
+			workspaceDiscoveryIgnore: ['**/lib/**'],
+		})
+		expect(result.some(p => p.includes(path.join('app', 'build.gradle')))).to.be.true
+		expect(result.some(p => p.includes(path.join('lib', 'build.gradle')))).to.be.false
+	}).timeout(40000)
+})
+
 suite('discoverMavenModules', () => {
 	test('returns empty when no pom.xml at root', async () => {
 		const result = await discoverMavenModules('test/providers/tst_manifests/npm')
 		expect(result).to.be.an('array')
 		expect(result).to.have.lengthOf(0)
 	})
-
 	test('returns root pom only when mvn reports no modules', async () => {
 		const root = path.resolve('test/providers/tst_manifests/maven/maven_no_modules')
 		const result = await discoverMavenModules(root)
