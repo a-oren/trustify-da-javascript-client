@@ -4,6 +4,7 @@ import path from 'node:path'
 import { expect } from 'chai'
 import esmock from 'esmock'
 
+import { discoverGoWorkspaceModules } from '../../src/providers/golang_gomodules.js'
 import { discoverGradleSubprojects } from '../../src/providers/java_gradle.js'
 import { discoverMavenModules } from '../../src/providers/java_maven.js'
 import {
@@ -267,6 +268,7 @@ suite('discoverMavenModules', () => {
 		expect(result).to.be.an('array')
 		expect(result).to.have.lengthOf(0)
 	})
+
 	test('returns root pom only when mvn reports no modules', async () => {
 		const root = path.resolve('test/providers/tst_manifests/maven/maven_no_modules')
 		const result = await discoverMavenModules(root)
@@ -319,4 +321,85 @@ suite('discoverMavenModules', () => {
 		expect(result.some(p => p.includes('module-a'))).to.be.true
 		expect(result.some(p => p.includes('module-b'))).to.be.false
 	}).timeout(40000)
+})
+
+suite('discoverGoWorkspaceModules', () => {
+	test('returns empty when no go.work at root', async () => {
+		const result = await discoverGoWorkspaceModules('test/providers/tst_manifests/npm')
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(0)
+	})
+
+	test('discovers modules from go.work with two modules', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace')
+		const result = await discoverGoWorkspaceModules(root)
+		expect(result).to.be.an('array')
+		expect(result).to.have.lengthOf(2)
+		expect(result.every(p => p.endsWith('go.mod'))).to.be.true
+		expect(result.some(p => p.includes('module-a'))).to.be.true
+		expect(result.some(p => p.includes('module-b'))).to.be.true
+	})
+
+	test('discovers modules from nested directories', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace_nested')
+		const result = await discoverGoWorkspaceModules(root)
+		expect(result).to.have.lengthOf(2)
+		expect(result.some(p => p.includes(path.join('libs', 'core', 'go.mod')))).to.be.true
+		expect(result.some(p => p.includes(path.join('libs', 'util', 'go.mod')))).to.be.true
+	})
+
+	test('discovers single module', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace_single')
+		const result = await discoverGoWorkspaceModules(root)
+		expect(result).to.have.lengthOf(1)
+		expect(result[0]).to.include(path.join('mymod', 'go.mod'))
+	})
+
+	test('skips modules whose directory does not exist', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace_missing_module')
+		const result = await discoverGoWorkspaceModules(root)
+		expect(result).to.have.lengthOf(1)
+		expect(result[0]).to.include(path.join('existing', 'go.mod'))
+	})
+
+	test('returns empty when go command fails', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace')
+		const { discoverGoWorkspaceModules: discoverMocked } = await esmock('../../src/providers/golang_gomodules.js', {
+			'../../src/tools.js': {
+				getCustom: () => null,
+				getCustomPath: () => 'go',
+				invokeCommand: () => { throw new Error('go not found') },
+			},
+		})
+		const result = await discoverMocked(root)
+		expect(result).to.have.lengthOf(0)
+	})
+
+	test('returns empty when go output is invalid JSON', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace')
+		const { discoverGoWorkspaceModules: discoverMocked } = await esmock('../../src/providers/golang_gomodules.js', {
+			'../../src/tools.js': {
+				getCustom: () => null,
+				getCustomPath: () => 'go',
+				invokeCommand: () => Buffer.from('not json'),
+			},
+		})
+		const result = await discoverMocked(root)
+		expect(result).to.have.lengthOf(0)
+	})
+
+	test('returns empty when Use is null (no use directives)', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace_empty')
+		const result = await discoverGoWorkspaceModules(root)
+		expect(result).to.have.lengthOf(0)
+	})
+
+	test('applies ignore patterns to discovered modules', async () => {
+		const root = path.resolve('test/providers/tst_manifests/golang/go_workspace_nested')
+		const result = await discoverGoWorkspaceModules(root, {
+			workspaceDiscoveryIgnore: ['**/util/**'],
+		})
+		expect(result.some(p => p.includes(path.join('libs', 'core', 'go.mod')))).to.be.true
+		expect(result.some(p => p.includes(path.join('libs', 'util', 'go.mod')))).to.be.false
+	})
 })
