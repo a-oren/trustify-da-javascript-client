@@ -83,7 +83,9 @@ export default class Python_pip_pyproject extends Base_pyproject {
 			let name = pkg.metadata.name
 			let version = pkg.metadata.version
 			let key = this._canonicalize(name)
-			graph.set(key, { name, version, children: [] })
+			let sha256 = pkg.download_info?.archive_info?.hashes?.sha256
+			let hashes = sha256 ? [{alg: "SHA-256", content: sha256}] : undefined
+			graph.set(key, { name, version, children: [], hashes })
 		}
 
 		for (let pkg of nonRootPackages) {

@@ -275,14 +275,17 @@ suite('testing the python-pyproject data provider', () => {
 		/** Verifies stack and component SBOM output matches expected pip fixtures. */
 		SBOM_CASES.forEach(({type, method, fixture}) => {
 			test(`verify pyproject.toml sbom provided for ${type} analysis with pip`, async () => {
-				let expectedSbom = fs.readFileSync(path.join(pipFixtureDir, fixture)).toString().trim()
-				expectedSbom = JSON.stringify(JSON.parse(expectedSbom))
+				let expectedSbom = JSON.parse(fs.readFileSync(path.join(pipFixtureDir, fixture)).toString().trim())
 				let result = await pipProvider[method](path.join(pipFixtureDir, 'pyproject.toml'))
-				expect(result).to.deep.equal({
-					ecosystem: 'pip',
-					contentType: 'application/vnd.cyclonedx+json',
-					content: expectedSbom
-				})
+				let actualSbom = JSON.parse(result.content)
+				// Strip hashes before comparison — they are platform-dependent
+				// (e.g. charset-normalizer resolves to different wheels per platform).
+				// Hash correctness is verified by the dedicated SHA-256 tests below.
+				for (let c of expectedSbom.components) { delete c.hashes }
+				for (let c of actualSbom.components) { delete c.hashes }
+				expect(result.ecosystem).to.equal('pip')
+				expect(result.contentType).to.equal('application/vnd.cyclonedx+json')
+				expect(actualSbom).to.deep.equal(expectedSbom)
 			}).timeout(TIMEOUT)
 		})
 
@@ -328,6 +331,49 @@ suite('testing the python-pyproject data provider', () => {
 			expect(pkg).to.exist
 			expect(pkg.version).to.equal('3.4.7')
 		}).timeout(TIMEOUT)
+
+		/** Verifies SHA-256 hashes from pip report appear in SBOM components. */
+		test('SBOM components include SHA-256 hashes from pip report', async () => {
+			let result = await pipProvider.provideStack(path.join(pipFixtureDir, 'pyproject.toml'))
+			let sbom = JSON.parse(result.content)
+			for (let component of sbom.components) {
+				expect(component.hashes).to.be.an('array').with.lengthOf(1)
+				expect(component.hashes[0].alg).to.equal('SHA-256')
+				expect(component.hashes[0].content).to.be.a('string').with.lengthOf(64)
+			}
+		}).timeout(TIMEOUT)
+
+		/** Verifies graceful handling when pip report lacks hash data. */
+		test('_parsePipReport handles missing hash data gracefully', () => {
+			// Given a pip report with packages that have no download_info or hashes
+			let report = JSON.stringify({
+				install: [
+					{
+						download_info: { dir_info: {} },
+						metadata: { name: 'root-project', version: '1.0.0', requires_dist: ['dep-a'] }
+					},
+					{
+						metadata: { name: 'dep-a', version: '2.0.0' }
+					},
+					{
+						download_info: { archive_info: {} },
+						metadata: { name: 'dep-b', version: '3.0.0' }
+					},
+					{
+						download_info: { archive_info: { hashes: {} } },
+						metadata: { name: 'dep-c', version: '4.0.0' }
+					}
+				]
+			})
+
+			// When parsing the report
+			let { graph } = pipProvider._parsePipReport(report)
+
+			// Then packages without SHA-256 should have no hashes
+			expect(graph.get('dep-a').hashes).to.be.undefined
+			expect(graph.get('dep-b').hashes).to.be.undefined
+			expect(graph.get('dep-c').hashes).to.be.undefined
+		})
 	})
 
 	/** Verifies uv and poetry validateLockFile returns false when no lock file is present. */
