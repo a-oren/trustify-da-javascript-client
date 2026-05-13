@@ -210,7 +210,11 @@ async function componentAnalysis(manifest, opts = {}) {
 	fs.accessSync(manifest, fs.constants.R_OK)
 	opts["manifest-type"] = path.basename(manifest)
 	let provider = match(manifest, availableProviders, opts) // throws error if no matching provider
-	return await analysis.requestComponent(provider, manifest, theUrl, opts) // throws error request sending failed
+	const result = await analysis.requestComponent(provider, manifest, theUrl, opts) // throws error request sending failed
+	if (typeof provider._cmdName === 'function') {
+		result.packageManager = provider._cmdName()
+	}
+	return result
 }
 
 /**
