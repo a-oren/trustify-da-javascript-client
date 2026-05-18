@@ -83,6 +83,14 @@ export default class Base_javascript {
 	}
 
 	/**
+   * Returns the package manager name (e.g. npm, yarn, pnpm, bun)
+   * @returns {string} The package manager name
+   */
+	packageManagerName() {
+		return this._cmdName();
+	}
+
+	/**
    * Returns the command arguments for listing dependencies
    * @returns {Array<string>} The command arguments
    * @abstract

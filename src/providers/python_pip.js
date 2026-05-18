@@ -14,7 +14,7 @@ import {
 import Python_controller from './python_controller.js'
 import { getParser, getIgnoreQuery, getPinnedVersionQuery } from './requirements_parser.js'
 
-export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest, _cmdName() { return 'pip' } }
+export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest, packageManagerName() { return 'pip' } }
 
 /** @typedef {{name: string, version: string, dependencies: DependencyEntry[], hashes?: Array<{alg: string, content: string}>}} DependencyEntry */
 

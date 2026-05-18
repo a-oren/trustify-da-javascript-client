@@ -8,7 +8,7 @@ import { getLicense } from '../license/license_utils.js'
 import Sbom from '../sbom.js'
 import { getCustom, getCustomPath, invokeCommand } from '../tools.js'
 
-export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest }
+export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest, packageManagerName() { return 'cargo' } }
 
 /** @typedef {import('../provider').Provider} */
 

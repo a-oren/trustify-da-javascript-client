@@ -211,9 +211,7 @@ async function componentAnalysis(manifest, opts = {}) {
 	opts["manifest-type"] = path.basename(manifest)
 	let provider = match(manifest, availableProviders, opts) // throws error if no matching provider
 	const result = await analysis.requestComponent(provider, manifest, theUrl, opts) // throws error request sending failed
-	if (typeof provider._cmdName === 'function') {
-		result.packageManager = provider._cmdName()
-	}
+	result.packageManager = provider.packageManagerName()
 	return result
 }
 

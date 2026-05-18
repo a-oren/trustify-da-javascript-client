@@ -10,7 +10,7 @@ import { filterManifestPathsByDiscoveryIgnore, resolveWorkspaceDiscoveryIgnore }
 
 import { getParser, getRequireQuery } from './gomod_parser.js'
 
-export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest }
+export default { isSupported, validateLockFile, provideComponent, provideStack, readLicenseFromManifest, packageManagerName() { return 'go' } }
 
 /** @typedef {import('../provider').Provider} */
 

@@ -36,6 +36,14 @@ export default class Base_Java {
 	}
 
 	/**
+	 * Returns the package manager name (e.g. mvn, gradle)
+	 * @returns {string}
+	 */
+	packageManagerName() {
+		return this.globalBinary
+	}
+
+	/**
 	 * Recursively populates the SBOM instance with the parsed graph
 	 * @param {string} src - Source dependency to start the calculations from
 	 * @param {number} srcDepth - Current depth in the graph for the given source

@@ -169,6 +169,14 @@ export default class Base_pyproject {
 	}
 
 	/**
+	 * Returns the package manager name (e.g. pip, poetry, uv)
+	 * @returns {string}
+	 */
+	packageManagerName() {
+		return this._cmdName()
+	}
+
+	/**
 	 * Resolve dependencies using the tool-specific command and parser.
 	 *
 	 * @param {string} manifestDir - directory containing the target pyproject.toml
