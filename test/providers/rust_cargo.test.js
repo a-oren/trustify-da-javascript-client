@@ -538,3 +538,41 @@ suite('testing rust-cargo license detection', () => {
 		expect(sbom.metadata.component.licenses).to.be.undefined
 	}).timeout(10000)
 }).beforeAll(() => clock = useFakeTimers(new Date('2023-08-07T00:00:00.000Z'))).afterAll(() => clock.restore());
+
+suite('testing rust-cargo workspace license inheritance', () => {
+	const workspaceLicenseDir = 'test/providers/tst_manifests/cargo/cargo_single_crate_workspace_license'
+
+	/** Verifies that workspace-inherited license resolves correctly in stack analysis SBOM. */
+	test('verify workspace-inherited license is resolved in SBOM (stack analysis)', async () => {
+		await assertSbomMatchesExpected(workspaceLicenseDir, 'stack')
+	}).timeout(10000)
+
+	/** Verifies that workspace-inherited license resolves correctly in component analysis SBOM. */
+	test('verify workspace-inherited license is resolved in SBOM (component analysis)', async () => {
+		await assertSbomMatchesExpected(workspaceLicenseDir, 'component')
+	}).timeout(10000)
+
+	/** Verifies the resolved license value is Apache-2.0 from [workspace.package]. */
+	test('verify resolved workspace license is Apache-2.0 in SBOM metadata', async () => {
+		let sbom = await getParsedSbom(workspaceLicenseDir, 'stack')
+		expect(sbom.metadata.component.licenses).to.deep.equal([{ license: { id: 'Apache-2.0' } }])
+	}).timeout(10000)
+
+	const workspaceLicenseMissingDir = 'test/providers/tst_manifests/cargo/cargo_single_crate_workspace_license_missing'
+
+	/** Verifies SBOM omits licenses when workspace_root exists but has no license field. */
+	test('verify SBOM omits licenses when workspace license is missing (stack analysis)', async () => {
+		await assertSbomMatchesExpected(workspaceLicenseMissingDir, 'stack')
+	}).timeout(10000)
+
+	/** Verifies SBOM omits licenses when workspace_root exists but has no license field. */
+	test('verify SBOM omits licenses when workspace license is missing (component analysis)', async () => {
+		await assertSbomMatchesExpected(workspaceLicenseMissingDir, 'component')
+	}).timeout(10000)
+
+	/** Verifies the licenses property is undefined when workspace license cannot be resolved. */
+	test('verify licenses is undefined when workspace license is missing', async () => {
+		let sbom = await getParsedSbom(workspaceLicenseMissingDir, 'stack')
+		expect(sbom.metadata.component.licenses).to.be.undefined
+	}).timeout(10000)
+}).beforeAll(() => clock = useFakeTimers(new Date('2023-08-07T00:00:00.000Z'))).afterAll(() => clock.restore());
