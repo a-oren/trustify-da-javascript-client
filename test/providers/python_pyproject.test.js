@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 
 import { expect } from 'chai'
+import esmock from 'esmock'
 import { useFakeTimers } from 'sinon'
 
 import Python_pip_pyproject from '../../src/providers/python_pip_pyproject.js'
@@ -644,4 +645,106 @@ suite('testing the python-pyproject data provider', () => {
 }).afterAll(() => {
 	Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
 	clock.restore()
+})
+
+suite('testing python-poetry error handling', () => {
+	/** Verifies that a missing poetry binary produces a clear error message. */
+	test('verify error when poetry binary is not accessible', async () => {
+		let provider = await esmock('../../src/providers/python_poetry.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => '/nonexistent/poetry',
+				invokeCommand: () => {
+					let err = new Error('spawn /nonexistent/poetry ENOENT')
+					err.code = 'ENOENT'
+					throw err
+				}
+			}
+		})
+
+		let instance = new provider.default()
+		expect(() => instance._verifyPoetryAccessible('/nonexistent/poetry'))
+			.to.throw('poetry is not accessible at "/nonexistent/poetry"')
+	}).timeout(TIMEOUT)
+
+	/** Verifies that an accessible poetry binary does not throw. */
+	test('verify no error when poetry binary is accessible', async () => {
+		let provider = await esmock('../../src/providers/python_poetry.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => 'poetry',
+				invokeCommand: () => Buffer.from('Poetry (version 1.8.0)')
+			}
+		})
+
+		let instance = new provider.default()
+		expect(() => instance._verifyPoetryAccessible('poetry')).to.not.throw()
+	}).timeout(TIMEOUT)
+
+	/** Verifies that non-ENOENT errors are re-thrown with cause chain preserved. */
+	test('verify non-ENOENT errors are re-thrown with cause', async () => {
+		let originalError = new Error('permission denied')
+		originalError.code = 'EACCES'
+
+		let provider = await esmock('../../src/providers/python_poetry.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => 'poetry',
+				invokeCommand: () => {
+					throw originalError
+				}
+			}
+		})
+
+		let instance = new provider.default()
+		expect(() => instance._verifyPoetryAccessible('poetry'))
+			.to.throw('failed to check for poetry binary')
+	}).timeout(TIMEOUT)
+
+	/** Verifies that _getDependencyData skips binary verification when both env vars bypass poetry. */
+	test('verify _getDependencyData skips binary check when both env vars are set', async () => {
+		let provider = await esmock('../../src/providers/python_poetry.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => '/nonexistent/poetry',
+				environmentVariableIsPopulated: (name) => {
+					return name === 'TRUSTIFY_DA_POETRY_SHOW_TREE' || name === 'TRUSTIFY_DA_POETRY_SHOW_ALL'
+				},
+				invokeCommand: () => {
+					let err = new Error('spawn /nonexistent/poetry ENOENT')
+					err.code = 'ENOENT'
+					throw err
+				}
+			}
+		})
+
+		let instance = new provider.default()
+		instance._getPoetryShowTreeOutput = () => ''
+		instance._getPoetryShowAllOutput = () => ''
+		instance._parsePoetryShowAll = () => new Map()
+		instance._findLockFileDir = () => '/tmp'
+		instance._extractMarkerData = () => ({})
+		instance._parsePoetryTree = () => ({ directDeps: [], graph: new Map() })
+
+		await instance._getDependencyData('/tmp', '/tmp', { tool: {} }, {})
+	}).timeout(TIMEOUT)
+
+	/** Verifies that _getDependencyData runs binary verification when env vars are not set. */
+	test('verify _getDependencyData runs binary check when env vars are not set', async () => {
+		let provider = await esmock('../../src/providers/python_poetry.js', {
+			'../../src/tools.js': {
+				getCustomPath: () => '/nonexistent/poetry',
+				environmentVariableIsPopulated: () => false,
+				invokeCommand: () => {
+					let err = new Error('spawn /nonexistent/poetry ENOENT')
+					err.code = 'ENOENT'
+					throw err
+				}
+			}
+		})
+
+		let instance = new provider.default()
+		try {
+			await instance._getDependencyData('/tmp', '/tmp', { tool: {} }, {})
+			expect.fail('Expected error to be thrown')
+		} catch (e) {
+			expect(e.message).to.include('poetry is not accessible')
+		}
+	}).timeout(TIMEOUT)
 })
