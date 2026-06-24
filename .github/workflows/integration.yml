@@ -19,7 +19,7 @@ jobs:
     if: |
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'workflow_dispatch'
-    uses: trustification/exhort-integration-tests/.github/workflows/integration.yml@main
+    uses: a-oren/exhort-integration-tests/.github/workflows/integration.yml@TC-4813
     with:
       language: javascript
       repo-url: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name || github.repository }}
