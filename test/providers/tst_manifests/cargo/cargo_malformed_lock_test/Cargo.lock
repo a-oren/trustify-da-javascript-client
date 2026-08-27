@@ -1,0 +1,4 @@
+# This is a malformed Cargo.lock file for testing error handling
+[package
+name = "broken"
+this is not valid TOML syntax

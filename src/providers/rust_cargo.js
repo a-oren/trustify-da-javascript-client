@@ -299,7 +299,7 @@ function parseCargoLockHashes(manifestDir, opts = {}) {
 			}
 		}
 	} catch (error) {
-		console.warn('Failed to parse Cargo.lock for hashes, SBOM will be generated without hashes')
+		console.warn(`Failed to parse Cargo.lock at ${lockPath} for hashes: ${error.message}. SBOM will be generated without hashes.`)
 	}
 	return hashMap
 }
@@ -470,7 +470,7 @@ function addTransitiveDeps(sbom, metadata, packageId, ignoredDeps, visited, hash
 			? toPathDepPurl(depPackage.name, depPackage.version)
 			: toPurl(depPackage.name, depPackage.version)
 
-		let hashes = hashMap ? hashMap.get(`${depPackage.name}@${depPackage.version}`) : undefined
+		let hashes = hashMap.get(`${depPackage.name}@${depPackage.version}`)
 		sbom.addDependency(sourcePurl, depPurl, undefined, hashes)
 		addTransitiveDeps(sbom, metadata, depId, ignoredDeps, visited, hashMap)
 	}
@@ -501,7 +501,7 @@ function addDirectDeps(sbom, metadata, packageId, parentPurl, ignoredDeps, hashM
 			? toPathDepPurl(depPackage.name, depPackage.version)
 			: toPurl(depPackage.name, depPackage.version)
 
-		let hashes = hashMap ? hashMap.get(`${depPackage.name}@${depPackage.version}`) : undefined
+		let hashes = hashMap.get(`${depPackage.name}@${depPackage.version}`)
 		sbom.addDependency(parentPurl, depPurl, undefined, hashes)
 	}
 }
