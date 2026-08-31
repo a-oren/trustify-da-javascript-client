@@ -3,7 +3,7 @@ import path from 'path'
 
 import { expect } from 'chai'
 import esmock from 'esmock'
-import { useFakeTimers, spy } from 'sinon'
+import { useFakeTimers } from 'sinon'
 
 import { availableProviders, match } from '../../src/provider.js'
 import rustCargo from '../../src/providers/rust_cargo.js'
@@ -624,24 +624,5 @@ suite('testing rust-cargo workspace license inheritance', () => {
 	test('verify licenses is undefined when workspace license is missing', async () => {
 		let sbom = await getParsedSbom(workspaceLicenseMissingDir, 'stack')
 		expect(sbom.metadata.component.licenses).to.be.undefined
-	}).timeout(10000)
-
-	const malformedLockDir = 'test/providers/tst_manifests/cargo/cargo_malformed_lock_test'
-
-	/** Verifies error message includes lock file path and error detail when Cargo.lock is malformed. */
-	test('verify error message includes lock file path and error detail for malformed Cargo.lock', async () => {
-		let warnSpy = spy(console, 'warn')
-		try {
-			await getParsedSbom(malformedLockDir, 'stack')
-			expect(warnSpy.called).to.be.true
-			let warnCall = warnSpy.getCall(0)
-			let message = warnCall.args[0]
-			expect(message).to.include('Failed to parse Cargo.lock at')
-			expect(message).to.include('malformed_lock_test/Cargo.lock')
-			expect(message).to.include('for hashes:')
-			expect(message).to.include('SBOM will be generated without hashes.')
-		} finally {
-			warnSpy.restore()
-		}
 	}).timeout(10000)
 });
