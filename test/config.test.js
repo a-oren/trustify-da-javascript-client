@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +12,15 @@ import { loadConfig, mergeConfig, resolveConfig, CONFIG_FILENAME } from '../src/
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const validDir = path.join(testDir, 'fixtures', 'config', 'valid')
 const invalidDir = path.join(testDir, 'fixtures', 'config', 'invalid')
+const projectRoot = path.resolve(testDir, '..')
+const minimalPackageJson = '{"name":"cli-config-test","version":"1.0.0"}'
+const minimalPackageLock = JSON.stringify({
+	name: 'cli-config-test',
+	version: '1.0.0',
+	lockfileVersion: 3,
+	requires: true,
+	packages: { '': { name: 'cli-config-test', version: '1.0.0' } },
+})
 
 /**
  * Creates a fresh temporary directory outside the repository tree so config
@@ -18,6 +29,24 @@ const invalidDir = path.join(testDir, 'fixtures', 'config', 'invalid')
  */
 function makeTempDir() {
 	return fs.mkdtempSync(path.join(os.tmpdir(), 'trustify-da-config-'))
+}
+
+/** Runs the CLI without inheriting configuration environment variables. */
+function runCli(args, env = {}) {
+	const childEnv = { ...process.env, ...env }
+	delete childEnv.TRUSTIFY_DA_BACKEND_URL
+	delete childEnv.TRUSTIFY_DA_PROVIDERS
+	delete childEnv.TRUSTIFY_DA_SOURCES
+	Object.assign(childEnv, env)
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, ['src/cli.js', ...args], { cwd: projectRoot, env: childEnv })
+		let stdout = ''
+		let stderr = ''
+		child.stdout.on('data', data => { stdout += data })
+		child.stderr.on('data', data => { stderr += data })
+		child.on('error', reject)
+		child.on('close', code => resolve({ code, stdout, stderr }))
+	})
 }
 
 suite('loadConfig', () => {
@@ -228,5 +257,71 @@ suite('resolveConfig', () => {
 
 		// Then the explicit empty value is retained
 		expect(resolved.backendUrl).to.equal('')
+	})
+})
+
+suite('CLI configuration', function () {
+	this.timeout(10_000)
+
+	test('applies backend, providers, and sources from .trustify-da.yml', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(new URL(request.url, `http://${request.headers.host}`))
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end(JSON.stringify({ providers: {} }))
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), [
+				`backend-url: http://127.0.0.1:${port}`,
+				'providers: [redhat, osv]',
+				'sources: [osv]',
+			].join('\n'))
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['stack', path.join(tmp, 'package.json')])
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].pathname).to.equal('/api/v5/analysis')
+			expect(requests[0].searchParams.get('providers')).to.equal('redhat,osv')
+			expect(requests[0].searchParams.get('sources')).to.equal('osv')
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
+	test('an explicitly empty CLI provider value overrides the environment', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(new URL(request.url, `http://${request.headers.host}`))
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end(JSON.stringify({ providers: {} }))
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), `backend-url: http://127.0.0.1:${port}\n`)
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['stack', path.join(tmp, 'package.json'), '--providers', ''], {
+				TRUSTIFY_DA_PROVIDERS: 'env-provider',
+			})
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].searchParams.has('providers')).to.equal(false)
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
 	})
 })

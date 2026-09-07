@@ -101,13 +101,13 @@ export async function runRemediation(targetPath, options = {}) {
 	}
 
 	const opts = {}
-	if (backendUrl) {
+	if (backendUrl !== undefined) {
 		opts.TRUSTIFY_DA_BACKEND_URL = backendUrl
 	}
-	if (providers) {
+	if (providers !== undefined) {
 		opts.TRUSTIFY_DA_PROVIDERS = providers
 	}
-	if (sources) {
+	if (sources !== undefined) {
 		opts.TRUSTIFY_DA_SOURCES = sources
 	}
 

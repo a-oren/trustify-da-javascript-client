@@ -28,13 +28,13 @@ function configMiddleware(pathKey, options = {}) {
 			{ backendUrl: args.backendUrl, providers: args.providers, sources: args.sources, groupBy: args['group-by'] },
 			process.env
 		)
-		if (args.providers !== undefined) {
+		if (args.providers !== undefined || merged.providers.length) {
 			args.providers = merged.providers.join(',')
 		}
-		if (args.sources !== undefined) {
+		if (args.sources !== undefined || merged.sources.length) {
 			args.sources = merged.sources.join(',')
 		}
-		if (args.backendUrl !== undefined) {
+		if (merged.backendUrl != null) {
 			args.backendUrl = merged.backendUrl
 		}
 		if (options.groupBy) {
@@ -234,13 +234,13 @@ const stack = {
 		let html = args['html']
 		let summary = args['summary']
 		const opts = args.workspaceDir ? { TRUSTIFY_DA_WORKSPACE_DIR: args.workspaceDir } : {}
-		if (args.backendUrl) {
+		if (args.backendUrl !== undefined) {
 			opts.TRUSTIFY_DA_BACKEND_URL = args.backendUrl
 		}
-		if (args.providers) {
+		if (args.providers !== undefined) {
 			opts.TRUSTIFY_DA_PROVIDERS = args.providers
 		}
-		if (args.sources) {
+		if (args.sources !== undefined) {
 			opts.TRUSTIFY_DA_SOURCES = args.sources
 		}
 		let theProvidersSummary = new Map();
