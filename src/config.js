@@ -27,13 +27,14 @@ import { load as yamlLoad } from 'js-yaml'
  * }} ResolvedConfig
  */
 
-/** Name of the project config file discovered by walking up the directory tree. */
-export const CONFIG_FILENAME = '.trustify-da.yml'
+/** Config file names discovered by walking up the directory tree, in precedence order. */
+export const CONFIG_FILENAMES = ['.trustify-da.yml', '.trustify-da.yaml']
 
 /**
- * Walks up from `startPath` looking for a `.trustify-da.yml` file, similar to
- * how `.eslintrc` discovery works. If `startPath` points at a file, discovery
- * begins in its containing directory.
+ * Walks up from `startPath` looking for a `.trustify-da.yml` (or `.yaml`) file,
+ * similar to how `.eslintrc` discovery works. If `startPath` points at a file,
+ * discovery begins in its containing directory. Within a directory, `.yml` takes
+ * precedence over `.yaml`.
  * @param {string} startPath - manifest file or directory to start the search from
  * @returns {string | null} absolute path to the config file, or null if none found
  */
@@ -48,9 +49,11 @@ function findConfigFile(startPath) {
 	}
 	// Walk up until the filesystem root (where dirname(dir) === dir)
 	for (;;) {
-		const candidate = path.join(dir, CONFIG_FILENAME)
-		if (fs.existsSync(candidate)) {
-			return candidate
+		for (const name of CONFIG_FILENAMES) {
+			const candidate = path.join(dir, name)
+			if (fs.existsSync(candidate)) {
+				return candidate
+			}
 		}
 		const parent = path.dirname(dir)
 		if (parent === dir) {

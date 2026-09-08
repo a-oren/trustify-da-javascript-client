@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url'
 
 import { expect } from 'chai'
 
-import { loadConfig, mergeConfig, resolveConfig, CONFIG_FILENAME } from '../src/config.js'
+import { loadConfig, mergeConfig, resolveConfig, CONFIG_FILENAMES } from '../src/config.js'
+
+const [CONFIG_FILENAME] = CONFIG_FILENAMES
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const validDir = path.join(testDir, 'fixtures', 'config', 'valid')
