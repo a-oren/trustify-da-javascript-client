@@ -74,6 +74,7 @@ export {
  * TRUSTIFY_DA_YARN_PATH?: string | undefined,
  * TRUSTIFY_DA_WORKSPACE_DIR?: string | undefined,
  * TRUSTIFY_DA_LICENSE_CHECK?: string | undefined,
+ * licenseCheck?: boolean | undefined,
  * MATCH_MANIFEST_VERSIONS?: string | undefined,
  * TRUSTIFY_DA_SOURCE?: string | undefined,
  * TRUSTIFY_DA_TOKEN?: string | undefined,
@@ -235,7 +236,8 @@ async function imageAnalysis(imageRefs, html = false, opts = {}) {
 }
 
 /**
- * Max concurrent SBOM generations for batch workspace analysis. Env/opts override default 10.
+ * Max concurrent SBOM generations for batch workspace analysis. Options override environment;
+ * environment overrides the default of 10.
  * @param {Options} opts
  * @returns {number}
  * @private
