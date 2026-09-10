@@ -23,6 +23,7 @@ const minimalPackageLock = JSON.stringify({
 	requires: true,
 	packages: { '': { name: 'cli-config-test', version: '1.0.0' } },
 })
+const CLI_TIMEOUT_MS = 8_000
 
 /**
  * Creates a fresh temporary directory outside the repository tree so config
@@ -34,20 +35,40 @@ function makeTempDir() {
 }
 
 /** Runs the CLI without inheriting configuration environment variables. */
-function runCli(args, env = {}) {
-	const childEnv = { ...process.env, ...env }
-	delete childEnv.TRUSTIFY_DA_BACKEND_URL
-	delete childEnv.TRUSTIFY_DA_PROVIDERS
-	delete childEnv.TRUSTIFY_DA_SOURCES
+function runCli(args, env = {}, cwd = projectRoot) {
+	const childEnv = Object.fromEntries(
+		Object.entries(process.env).filter(([key]) => !key.startsWith('TRUSTIFY_DA_'))
+	)
 	Object.assign(childEnv, env)
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, ['src/cli.js', ...args], { cwd: projectRoot, env: childEnv })
+		const child = spawn(process.execPath, [path.join(projectRoot, 'src', 'cli.js'), ...args], { cwd, env: childEnv })
 		let stdout = ''
 		let stderr = ''
+		let settled = false
+		const timeout = setTimeout(() => {
+			if (settled) {
+				return
+			}
+			settled = true
+			child.kill('SIGTERM')
+			reject(new Error(`CLI timed out after ${CLI_TIMEOUT_MS}ms: ${args.join(' ')}`))
+		}, CLI_TIMEOUT_MS)
 		child.stdout.on('data', data => { stdout += data })
 		child.stderr.on('data', data => { stderr += data })
-		child.on('error', reject)
-		child.on('close', code => resolve({ code, stdout, stderr }))
+		child.on('error', error => {
+			if (!settled) {
+				settled = true
+				clearTimeout(timeout)
+				reject(error)
+			}
+		})
+		child.on('close', code => {
+			if (!settled) {
+				settled = true
+				clearTimeout(timeout)
+				resolve({ code, stdout, stderr })
+			}
+		})
 	})
 }
 
@@ -118,6 +139,33 @@ suite('loadConfig', () => {
 		expect(() => loadConfig(invalidDir)).to.throw(/Failed to parse config file/)
 	})
 
+	const invalidSchemaConfigs = [
+		['a sequence root', '- redhat\n', 'root must be a mapping'],
+		['a timestamp root', '2026-09-10\n', 'root must be a mapping'],
+		['a non-string backend URL', 'backend-url: 42\n', 'backend-url must be a string'],
+		['a non-string provider', 'providers: [redhat, 42]\n', 'providers must be an array of strings'],
+		['a scalar remediation section', 'remediation: invalid\n', 'remediation must be a mapping'],
+		['an invalid grouping strategy', 'remediation:\n  group-by: invalid\n', 'remediation.group-by must be dependency or bundle'],
+		['a non-string remediation exclusion', 'remediation:\n  exclude: [pkg:maven/example, 42]\n', 'remediation.exclude must be an array of strings'],
+		['a sequence check section', 'check: []\n', 'check must be a mapping'],
+		['a scalar fail-on section', 'check:\n  fail-on: invalid\n', 'check.fail-on must be a mapping'],
+		['a non-numeric failure threshold', 'check:\n  fail-on:\n    critical: invalid\n', 'check.fail-on.critical must be a finite number'],
+		['a scalar SBOM section', 'sbom: invalid\n', 'sbom must be a mapping'],
+		['a non-string SBOM format', 'sbom:\n  format: 42\n', 'sbom.format must be a string'],
+		['a non-string SBOM target', 'sbom:\n  targets: [artifact, 42]\n', 'sbom.targets must be an array of strings'],
+	]
+	invalidSchemaConfigs.forEach(([scenario, content, message]) => {
+		test(`rejects ${scenario}`, () => {
+			const tmp = makeTempDir()
+			try {
+				fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), content)
+				expect(() => loadConfig(tmp)).to.throw(message)
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true })
+			}
+		})
+	})
+
 	test('discovers a config file in a parent directory (walks up)', () => {
 		// Given a config file at the top of a nested temp tree
 		const tmp = makeTempDir()
@@ -129,6 +177,19 @@ suite('loadConfig', () => {
 			// When loading from a deeply nested subdirectory
 			// Then discovery walks up and finds the ancestor config
 			expect(loadConfig(deep).providers).to.deep.equal(['redhat'])
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
+	test('skips a config path that is not a regular file', () => {
+		const tmp = makeTempDir()
+		try {
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), 'providers: [redhat]\n')
+			const child = path.join(tmp, 'child')
+			fs.mkdirSync(path.join(child, CONFIG_FILENAME), { recursive: true })
+
+			expect(loadConfig(child).providers).to.deep.equal(['redhat'])
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true })
 		}
@@ -154,6 +215,7 @@ suite('mergeConfig', () => {
 		expect(merged.sources).to.deep.equal(['osv'])
 		expect(merged.groupBy).to.equal('bundle')
 		expect(merged.backendUrl).to.equal('https://file.example.com')
+		expect(merged.backendUrlSource).to.equal('file')
 	})
 
 	test('CLI flags override config file values', () => {
@@ -168,6 +230,7 @@ suite('mergeConfig', () => {
 		expect(merged.providers).to.deep.equal(['snyk', 'osv'])
 		expect(merged.groupBy).to.equal('dependency')
 		expect(merged.backendUrl).to.equal('https://cli.example.com')
+		expect(merged.backendUrlSource).to.equal('cli')
 	})
 
 	test('CLI flags override environment variables and config file', () => {
@@ -194,6 +257,7 @@ suite('mergeConfig', () => {
 		expect(merged.sources).to.deep.equal([])
 		expect(merged.groupBy).to.equal('dependency')
 		expect(merged.backendUrl).to.equal(null)
+		expect(merged.backendUrlSource).to.equal('default')
 	})
 
 	test('rejects an invalid group-by value', () => {
@@ -202,6 +266,11 @@ suite('mergeConfig', () => {
 		// Then a descriptive validation error is thrown
 		expect(() => mergeConfig({}, { groupBy: 'invalid' }, {}))
 			.to.throw('Invalid group-by value "invalid"')
+	})
+
+	test('rejects an invalid file config passed directly', () => {
+		expect(() => mergeConfig({ check: [] }, {}, {}))
+			.to.throw('check must be a mapping')
 	})
 
 	test('CLI empty string overrides environment variable for providers', () => {
@@ -220,6 +289,7 @@ suite('mergeConfig', () => {
 
 		// Then the empty CLI value wins over the environment value
 		expect(merged.backendUrl).to.equal('')
+		expect(merged.backendUrlSource).to.equal('cli')
 	})
 })
 
@@ -259,6 +329,7 @@ suite('resolveConfig', () => {
 
 		// Then the explicit empty value is retained
 		expect(resolved.backendUrl).to.equal('')
+		expect(resolved.backendUrlSource).to.equal('environment')
 	})
 })
 
@@ -298,6 +369,113 @@ suite('CLI configuration', function () {
 		}
 	})
 
+	test('applies backend, providers, and sources from .trustify-da.yml for component', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(new URL(request.url, `http://${request.headers.host}`))
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end(JSON.stringify({ providers: {} }))
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), [
+				`backend-url: http://127.0.0.1:${port}`,
+				'providers: [redhat, osv]',
+				'sources: [osv]',
+			].join('\n'))
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['component', path.join(tmp, 'package.json')])
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].searchParams.get('providers')).to.equal('redhat,osv')
+			expect(requests[0].searchParams.get('sources')).to.equal('osv')
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
+	test('applies backend, providers, and sources from .trustify-da.yml for stack-batch', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(new URL(request.url, `http://${request.headers.host}`))
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end('{}')
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), [
+				`backend-url: http://127.0.0.1:${port}`,
+				'providers: [redhat, osv]',
+				'sources: [osv]',
+			].join('\n'))
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['stack-batch', tmp])
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].pathname).to.equal('/api/v5/batch-analysis')
+			expect(requests[0].searchParams.get('providers')).to.equal('redhat,osv')
+			expect(requests[0].searchParams.get('sources')).to.equal('osv')
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
+	test('discovers image command configuration from the current working directory', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(new URL(request.url, `http://${request.headers.host}`))
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end('{}')
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			const syftPath = path.join(tmp, 'fake-syft.mjs')
+			fs.writeFileSync(syftPath, [
+				'#!/usr/bin/env node',
+				"process.stdout.write(JSON.stringify({ metadata: { component: {} } }))",
+			].join('\n'))
+			fs.chmodSync(syftPath, 0o755)
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), [
+				`backend-url: http://127.0.0.1:${port}`,
+				'providers: [redhat, osv]',
+				'sources: [osv]',
+			].join('\n'))
+			const digest = 'a'.repeat(64)
+
+			const result = await runCli(
+				['image', `example@sha256:${digest}`],
+				{ TRUSTIFY_DA_SYFT_PATH: syftPath },
+				tmp
+			)
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].pathname).to.equal('/api/v5/batch-analysis')
+			expect(requests[0].searchParams.get('providers')).to.equal('redhat,osv')
+			expect(requests[0].searchParams.get('sources')).to.equal('osv')
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
 	test('an explicitly empty CLI provider value overrides the environment', async () => {
 		const tmp = makeTempDir()
 		const requests = []
@@ -326,4 +504,64 @@ suite('CLI configuration', function () {
 			fs.rmSync(tmp, { recursive: true, force: true })
 		}
 	})
+
+	test('rejects a token when the backend is selected by project configuration', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(request)
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end(JSON.stringify({ providers: {} }))
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), `backend-url: http://127.0.0.1:${port}\n`)
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['stack', path.join(tmp, 'package.json')], {
+				TRUSTIFY_DA_TOKEN: 'secret-token',
+			})
+
+			expect(result.code).to.equal(1)
+			expect(result.stderr).to.include('Refusing to send TRUSTIFY_DA_TOKEN')
+			expect(requests).to.have.length(0)
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
+	test('allows a token when the backend is explicitly selected by environment', async () => {
+		const tmp = makeTempDir()
+		const requests = []
+		const server = http.createServer((request, response) => {
+			requests.push(request)
+			request.resume()
+			response.writeHead(200, { 'content-type': 'application/json' })
+			response.end(JSON.stringify({ providers: {} }))
+		})
+		try {
+			await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+			const { port } = server.address()
+			fs.writeFileSync(path.join(tmp, CONFIG_FILENAME), 'backend-url: https://untrusted.example.com\n')
+			fs.writeFileSync(path.join(tmp, 'package.json'), minimalPackageJson)
+			fs.writeFileSync(path.join(tmp, 'package-lock.json'), minimalPackageLock)
+
+			const result = await runCli(['stack', path.join(tmp, 'package.json')], {
+				TRUSTIFY_DA_BACKEND_URL: `http://127.0.0.1:${port}`,
+				TRUSTIFY_DA_TOKEN: 'secret-token',
+			})
+
+			expect(result.code, result.stderr).to.equal(0)
+			expect(requests).to.have.length(1)
+			expect(requests[0].headers['trust-da-token']).to.equal('secret-token')
+		} finally {
+			await new Promise(resolve => server.close(resolve))
+			fs.rmSync(tmp, { recursive: true, force: true })
+		}
+	})
+
 })

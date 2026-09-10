@@ -5,12 +5,26 @@ import { load as yamlLoad } from 'js-yaml'
 
 /**
  * @typedef {{
+ *   'group-by'?: 'dependency' | 'bundle',
+ *   exclude?: string[],
+ *   labels?: string[],
+ *   'branch-prefix'?: string,
+ *   [key: string]: unknown
+ * }} RemediationConfig
+ */
+
+/** @typedef {{ critical?: number, high?: number, 'license-conflicts'?: number, [key: string]: unknown }} FailOnConfig */
+/** @typedef {{ 'fail-on'?: FailOnConfig, [key: string]: unknown }} CheckConfig */
+/** @typedef {{ format?: string, targets?: string[], [key: string]: unknown }} SbomConfig */
+
+/**
+ * @typedef {{
  *   'backend-url'?: string,
  *   providers?: string[] | string,
  *   sources?: string[] | string,
- *   remediation?: object,
- *   check?: object,
- *   sbom?: object,
+ *   remediation?: RemediationConfig,
+ *   check?: CheckConfig,
+ *   sbom?: SbomConfig,
  *   [key: string]: unknown
  * }} FileConfig
  */
@@ -18,6 +32,7 @@ import { load as yamlLoad } from 'js-yaml'
 /**
  * @typedef {{
  *   backendUrl: string | null,
+ *   backendUrlSource: 'cli' | 'environment' | 'file' | 'default',
  *   providers: string[],
  *   sources: string[],
  *   groupBy: string,
@@ -29,6 +44,95 @@ import { load as yamlLoad } from 'js-yaml'
 
 /** Config file names discovered by walking up the directory tree, in precedence order. */
 export const CONFIG_FILENAMES = ['.trustify-da.yml', '.trustify-da.yaml']
+
+function isMapping(value) {
+	if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+		return false
+	}
+	const prototype = Object.getPrototypeOf(value)
+	return prototype === Object.prototype || prototype == null
+}
+
+function assertMapping(value, field, source) {
+	if (!isMapping(value)) {
+		throw new Error(`Invalid config file ${source}: ${field} must be a mapping`)
+	}
+}
+
+function assertString(value, field, source) {
+	if (typeof value !== 'string') {
+		throw new Error(`Invalid config file ${source}: ${field} must be a string`)
+	}
+}
+
+function assertStringArray(value, field, source) {
+	if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
+		throw new Error(`Invalid config file ${source}: ${field} must be an array of strings`)
+	}
+}
+
+function assertStringOrArray(value, field, source) {
+	if (typeof value !== 'string') {
+		assertStringArray(value, field, source)
+	}
+}
+
+/**
+ * Validates all fields in the initial configuration schema. Unknown fields are preserved.
+ * @param {unknown} config
+ * @param {string} [source]
+ * @returns {FileConfig}
+ */
+function validateConfig(config, source = '<config>') {
+	assertMapping(config, 'root', source)
+	if (config['backend-url'] !== undefined) {
+		assertString(config['backend-url'], 'backend-url', source)
+	}
+	if (config.providers !== undefined) {
+		assertStringOrArray(config.providers, 'providers', source)
+	}
+	if (config.sources !== undefined) {
+		assertStringOrArray(config.sources, 'sources', source)
+	}
+	if (config.remediation !== undefined) {
+		assertMapping(config.remediation, 'remediation', source)
+		const remediation = config.remediation
+		if (remediation['group-by'] !== undefined && !['dependency', 'bundle'].includes(remediation['group-by'])) {
+			throw new Error(`Invalid config file ${source}: remediation.group-by must be dependency or bundle`)
+		}
+		if (remediation.exclude !== undefined) {
+			assertStringArray(remediation.exclude, 'remediation.exclude', source)
+		}
+		if (remediation.labels !== undefined) {
+			assertStringArray(remediation.labels, 'remediation.labels', source)
+		}
+		if (remediation['branch-prefix'] !== undefined) {
+			assertString(remediation['branch-prefix'], 'remediation.branch-prefix', source)
+		}
+	}
+	if (config.check !== undefined) {
+		assertMapping(config.check, 'check', source)
+		if (config.check['fail-on'] !== undefined) {
+			assertMapping(config.check['fail-on'], 'check.fail-on', source)
+			for (const field of ['critical', 'high', 'license-conflicts']) {
+				const value = config.check['fail-on'][field]
+				if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value))) {
+					throw new Error(`Invalid config file ${source}: check.fail-on.${field} must be a finite number`)
+				}
+			}
+		}
+	}
+	if (config.sbom !== undefined) {
+		assertMapping(config.sbom, 'sbom', source)
+		if (config.sbom.format !== undefined) {
+			assertString(config.sbom.format, 'sbom.format', source)
+		}
+		if (config.sbom.targets !== undefined) {
+			assertStringArray(config.sbom.targets, 'sbom.targets', source)
+		}
+	}
+	return config
+}
 
 /**
  * Walks up from `startPath` looking for a `.trustify-da.yml` (or `.yaml`) file,
@@ -51,8 +155,12 @@ function findConfigFile(startPath) {
 	for (;;) {
 		for (const name of CONFIG_FILENAMES) {
 			const candidate = path.join(dir, name)
-			if (fs.existsSync(candidate)) {
-				return candidate
+			try {
+				if (fs.statSync(candidate).isFile()) {
+					return candidate
+				}
+			} catch {
+				// Ignore inaccessible or disappearing candidates and continue discovery.
 			}
 		}
 		const parent = path.dirname(dir)
@@ -83,7 +191,7 @@ export function loadConfig(startPath) {
 	} catch (err) {
 		throw new Error(`Failed to parse config file ${configPath}: ${err.message}`)
 	}
-	return doc && typeof doc === 'object' ? doc : {}
+	return doc == null ? {} : validateConfig(doc, configPath)
 }
 
 /**
@@ -122,15 +230,28 @@ function first(...values) {
  * @returns {ResolvedConfig} the resolved, typed config object
  */
 export function mergeConfig(fileConfig = {}, cliFlags = {}, envVars = {}) {
-	const file = fileConfig || {}
+	const file = validateConfig(fileConfig || {})
 	const cli = cliFlags || {}
 	const env = envVars || {}
+	let backendUrl = null
+	let backendUrlSource = 'default'
+	if (cli.backendUrl != null) {
+		backendUrl = cli.backendUrl
+		backendUrlSource = 'cli'
+	} else if (env.TRUSTIFY_DA_BACKEND_URL != null) {
+		backendUrl = env.TRUSTIFY_DA_BACKEND_URL
+		backendUrlSource = 'environment'
+	} else if (file['backend-url'] != null) {
+		backendUrl = file['backend-url']
+		backendUrlSource = 'file'
+	}
 	const groupBy = first(cli.groupBy, env.TRUSTIFY_DA_GROUP_BY, file.remediation?.['group-by']) ?? 'dependency'
 	if (!['dependency', 'bundle'].includes(groupBy)) {
 		throw new Error(`Invalid group-by value "${groupBy}". Expected dependency or bundle.`)
 	}
 	return {
-		backendUrl: first(cli.backendUrl, env.TRUSTIFY_DA_BACKEND_URL, file['backend-url']) ?? null,
+		backendUrl,
+		backendUrlSource,
 		providers: toArray(first(cli.providers, env.TRUSTIFY_DA_PROVIDERS, file.providers)),
 		sources: toArray(first(cli.sources, env.TRUSTIFY_DA_SOURCES, file.sources)),
 		groupBy,
