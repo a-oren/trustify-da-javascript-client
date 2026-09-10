@@ -119,9 +119,11 @@ suite('remediate — runRemediation', () => {
 
 				// Then exit code should be 2 and file should not be modified
 				expect(result.exitCode).to.equal(2)
-				expect(result.output).to.include('commons-text')
-				expect(result.output).to.include('1.9')
-				expect(result.output).to.include('1.10.0')
+				expect(result.remediations).to.have.lengthOf(1)
+				expect(result.remediations[0].artifactId).to.equal('commons-text')
+				expect(result.remediations[0].currentVersion).to.equal('1.9')
+				expect(result.remediations[0].fixedInVersion).to.equal('1.10.0')
+				expect(result.remediations[0].files).to.deep.equal([pomPath])
 				expect(fs.readFileSync(pomPath, 'utf-8')).to.equal(SAMPLE_POM)
 			} finally {
 				cleanup()
@@ -147,6 +149,37 @@ suite('remediate — runRemediation', () => {
 				const updatedContent = fs.readFileSync(pomPath, 'utf-8')
 				expect(updatedContent).to.include('1.10.0')
 				expect(updatedContent).to.not.include('>1.9<')
+				// The written manifest is reported in appliedFiles
+				expect(result.appliedFiles).to.deep.equal([pomPath])
+			} finally {
+				cleanup()
+			}
+		})
+
+		/**
+		 * A dependency surfaced by analysis but not locatable in the manifest (e.g. a
+		 * transitive dep, or a version managed in a parent POM) yields a remediation but
+		 * no write. appliedFiles must stay empty so callers don't over-report "updated N
+		 * files" — the bug ruromero flagged where the CLI counted r.files instead.
+		 */
+		test('omits from appliedFiles a manifest that received no write', async () => {
+			const { dir, cleanup } = createTempDir({ 'pom.xml': SAMPLE_POM })
+			try {
+				const pomPath = path.join(dir, 'pom.xml')
+				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
+				// A vulnerable dep that is NOT declared in SAMPLE_POM — the updater applies nothing.
+				requestStackStub.resolves(buildAnalysisReport({
+					depRef: 'pkg:maven/com.transitive/deep-lib@1.0',
+					fixedIn: 'pkg:maven/com.transitive/deep-lib@1.1',
+				}))
+
+				const before = fs.readFileSync(pomPath, 'utf-8')
+				const result = await runRemediation(pomPath, {})
+
+				// The remediation is still reported, but nothing was written.
+				expect(result.remediations.length).to.be.greaterThan(0)
+				expect(result.appliedFiles).to.deep.equal([])
+				expect(fs.readFileSync(pomPath, 'utf-8')).to.equal(before)
 			} finally {
 				cleanup()
 			}
@@ -230,9 +263,12 @@ suite('remediate — runRemediation', () => {
 				// When running in apply mode (default) on the directory
 				const result = await runRemediation(dir, {})
 
-				// Then both files should be processed
+				// Then both manifests should yield remediations tagged with their file
 				expect(result.exitCode).to.equal(0)
-				expect(result.output).to.include('Updated')
+				expect(result.remediations).to.have.lengthOf(2)
+				const remediatedFiles = result.remediations.flatMap(r => r.files)
+				expect(remediatedFiles).to.include(path.join(dir, 'module-a', 'pom.xml'))
+				expect(remediatedFiles).to.include(path.join(dir, 'module-b', 'libs.versions.toml'))
 			} finally {
 				cleanup()
 			}
@@ -246,7 +282,7 @@ suite('remediate — runRemediation', () => {
 				const result = await runRemediation(dir)
 
 				expect(result.exitCode).to.equal(0)
-				expect(result.output).to.include('No supported manifest files found')
+				expect(result.remediations).to.deep.equal([])
 			} finally {
 				cleanup()
 			}
@@ -287,7 +323,7 @@ suite('remediate — runRemediation', () => {
 				const result = await runRemediation(pomPath, { dryRun: true })
 
 				expect(result.exitCode).to.equal(0)
-				expect(result.output).to.include('No remediations found')
+				expect(result.remediations).to.deep.equal([])
 			} finally {
 				cleanup()
 			}
@@ -328,21 +364,204 @@ suite('remediate — runRemediation', () => {
 		})
 	})
 
-	suite('group-by option', () => {
-		/** Verifies that --group-by bundle produces a bundled report. */
-		test('produces bundled report with group-by bundle', async () => {
+	suite('structured output', () => {
+		/** Verifies that runRemediation returns the full structured remediation shape. */
+		test('returns structured remediations with cves, severity, provider and files', async () => {
 			const { dir, cleanup } = createTempDir({ 'pom.xml': SAMPLE_POM })
 			try {
 				const pomPath = path.join(dir, 'pom.xml')
 				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
 				requestStackStub.resolves(buildAnalysisReport())
 
-				// When running without dry-run and with group-by bundle
-				const result = await runRemediation(pomPath, { groupBy: 'bundle' })
+				const result = await runRemediation(pomPath, {})
 
-				// Then the output should contain bundled report markers
 				expect(result.exitCode).to.equal(0)
-				expect(result.output).to.include('Security Update Summary')
+				expect(result.remediations).to.have.lengthOf(1)
+				const rem = result.remediations[0]
+				expect(rem.groupId).to.equal('org.apache.commons')
+				expect(rem.artifactId).to.equal('commons-text')
+				expect(rem.currentVersion).to.equal('1.9')
+				expect(rem.fixedInVersion).to.equal('1.10.0')
+				expect(rem.severity).to.equal('CRITICAL')
+				expect(rem.cves).to.deep.equal(['CVE-2022-42889'])
+				expect(rem.provider).to.equal('redhat')
+				expect(rem.files).to.deep.equal([pomPath])
+			} finally {
+				cleanup()
+			}
+		})
+	})
+
+	suite('per-dependency changes', () => {
+		const MULTI_POM = `<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-text</artifactId>
+      <version>1.9</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+      <version>2.14.0</version>
+    </dependency>
+  </dependencies>
+</project>`
+
+		const SHARED_PROP_POM = `<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <properties>
+    <commons.version>1.9</commons.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-text</artifactId>
+      <version>\${commons.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>\${commons.version}</version>
+    </dependency>
+  </dependencies>
+</project>`
+
+		/**
+		 * Builds an AnalysisReport containing several dependencies under one provider/source.
+		 * @param {Array<{depRef: string, fixedIn: string, issueId: string, severity?: string}>} deps
+		 * @returns {object}
+		 */
+		function buildMultiDepReport(deps) {
+			return {
+				providers: {
+					redhat: {
+						sources: {
+							osv: {
+								dependencies: deps.map(d => ({
+									ref: d.depRef,
+									issues: [{
+										id: d.issueId,
+										severity: d.severity ?? 'HIGH',
+										remediation: { fixedIn: d.fixedIn },
+									}],
+								})),
+							},
+						},
+					},
+				},
+			}
+		}
+
+		/** Two independent deps in one pom -> two changes with distinct keys, each isolated. */
+		test('two separate deps in one pom produce distinct changeKeys and isolated diffs', async () => {
+			const { dir, cleanup } = createTempDir({ 'pom.xml': MULTI_POM })
+			try {
+				const pomPath = path.join(dir, 'pom.xml')
+				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
+				requestStackStub.resolves(buildMultiDepReport([
+					{ depRef: 'pkg:maven/org.apache.commons/commons-text@1.9', fixedIn: 'pkg:maven/org.apache.commons/commons-text@1.10.0', issueId: 'CVE-2022-42889' },
+					{ depRef: 'pkg:maven/com.fasterxml.jackson.core/jackson-core@2.14.0', fixedIn: 'pkg:maven/com.fasterxml.jackson.core/jackson-core@2.15.0', issueId: 'CVE-2020-1000' },
+				]))
+
+				const result = await runRemediation(pomPath, { dryRun: true, perDependencyChanges: true })
+
+				expect(result.remediations).to.have.lengthOf(2)
+				const text = result.remediations.find(r => r.artifactId === 'commons-text')
+				const jackson = result.remediations.find(r => r.artifactId === 'jackson-core')
+
+				// Each remediation has exactly one isolated change, keyed distinctly.
+				expect(text.changes).to.have.lengthOf(1)
+				expect(jackson.changes).to.have.lengthOf(1)
+				expect(text.changes[0].changeKey).to.not.equal(jackson.changes[0].changeKey)
+				expect(text.changes[0].changeKey).to.equal(`mvn:direct:${pomPath}:org.apache.commons:commons-text`)
+				expect(text.changes[0].path).to.equal(pomPath)
+
+				// commons-text's isolated 'after' bumps ONLY commons-text; jackson stays untouched.
+				expect(text.changes[0].after).to.include('1.10.0')
+				expect(text.changes[0].after).to.include('2.14.0')
+				expect(text.changes[0].after).to.not.include('2.15.0')
+
+				// dry-run must not touch the working tree.
+				expect(fs.readFileSync(pomPath, 'utf-8')).to.equal(MULTI_POM)
+			} finally {
+				cleanup()
+			}
+		})
+
+		/** Two deps sharing one ${property} are inseparable -> identical changeKey. */
+		test('two deps sharing a maven property collapse to one changeKey', async () => {
+			const { dir, cleanup } = createTempDir({ 'pom.xml': SHARED_PROP_POM })
+			try {
+				const pomPath = path.join(dir, 'pom.xml')
+				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
+				requestStackStub.resolves(buildMultiDepReport([
+					{ depRef: 'pkg:maven/org.apache.commons/commons-text@1.9', fixedIn: 'pkg:maven/org.apache.commons/commons-text@1.10.0', issueId: 'CVE-2022-42889' },
+					{ depRef: 'pkg:maven/org.apache.commons/commons-lang3@1.9', fixedIn: 'pkg:maven/org.apache.commons/commons-lang3@1.10.0', issueId: 'CVE-2021-2000' },
+				]))
+
+				const result = await runRemediation(pomPath, { dryRun: true, perDependencyChanges: true })
+
+				expect(result.remediations).to.have.lengthOf(2)
+				const text = result.remediations.find(r => r.artifactId === 'commons-text')
+				const lang3 = result.remediations.find(r => r.artifactId === 'commons-lang3')
+
+				// Both resolve to the same <properties> line -> same key -> one PR.
+				const expectedKey = `mvn:prop:${pomPath}:commons.version`
+				expect(text.changes[0].changeKey).to.equal(expectedKey)
+				expect(lang3.changes[0].changeKey).to.equal(expectedKey)
+				expect(text.changes[0].after).to.include('<commons.version>1.10.0</commons.version>')
+			} finally {
+				cleanup()
+			}
+		})
+
+		/** Without the flag, no `changes` field is produced. */
+		test('omits changes when perDependencyChanges is not set', async () => {
+			const { dir, cleanup } = createTempDir({ 'pom.xml': SAMPLE_POM })
+			try {
+				const pomPath = path.join(dir, 'pom.xml')
+				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
+				requestStackStub.resolves(buildAnalysisReport())
+
+				const result = await runRemediation(pomPath, { dryRun: true })
+
+				expect(result.remediations[0].changes).to.equal(undefined)
+			} finally {
+				cleanup()
+			}
+		})
+
+		/**
+		 * Real-world scenario: stack analysis reports a vulnerable *transitive* dependency
+		 * — present in the resolved tree but not declared in pom.xml. The isolated updater
+		 * finds nothing to change for it, so it must be dropped rather than returned with an
+		 * absent `changes` array; otherwise a caller iterating `remediation.changes` to build
+		 * one PR per dependency would crash on `undefined`.
+		 */
+		test('drops a vulnerable transitive dependency absent from the manifest', async () => {
+			const { dir, cleanup } = createTempDir({ 'pom.xml': SAMPLE_POM })
+			try {
+				const pomPath = path.join(dir, 'pom.xml')
+				matchStub.returns({ provideStack: stub().resolves({ content: '{}', contentType: 'application/json', ecosystem: 'maven' }) })
+				// commons-text is declared directly (fixable); deep-lib is a transitive dep
+				// surfaced by analysis but not present in pom.xml (unfixable in this manifest).
+				requestStackStub.resolves(buildMultiDepReport([
+					{ depRef: 'pkg:maven/org.apache.commons/commons-text@1.9', fixedIn: 'pkg:maven/org.apache.commons/commons-text@1.10.0', issueId: 'CVE-2022-42889' },
+					{ depRef: 'pkg:maven/com.transitive/deep-lib@1.0', fixedIn: 'pkg:maven/com.transitive/deep-lib@1.1', issueId: 'CVE-2023-9999' },
+				]))
+
+				const result = await runRemediation(pomPath, { dryRun: true, perDependencyChanges: true })
+
+				// Only the directly-declared dependency survives; the transitive one is dropped.
+				expect(result.remediations).to.have.lengthOf(1)
+				expect(result.remediations[0].artifactId).to.equal('commons-text')
+
+				// Every returned remediation carries a usable changes array, so a caller can
+				// build isolated PRs without a guard and without crashing on `undefined`.
+				expect(result.remediations.every(r => Array.isArray(r.changes) && r.changes.length > 0)).to.equal(true)
+				expect(() => result.remediations.flatMap(r => r.changes)).to.not.throw()
 			} finally {
 				cleanup()
 			}

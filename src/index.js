@@ -27,6 +27,7 @@ export { getProjectLicense, findLicenseFilePath, identifyLicense, getLicenseDeta
 export { extractRemediations } from "./remediation.js";
 export { generateReport, generateDeduplicationKey } from './remediation_report.js'
 export { loadConfig, mergeConfig, resolveConfig, CONFIG_FILENAMES } from './config.js'
+export { runRemediation, findManifests } from './remediate.js'
 
 export default { componentAnalysis, stackAnalysis, stackAnalysisBatch, imageAnalysis, validateToken, generateSbom }
 export {
