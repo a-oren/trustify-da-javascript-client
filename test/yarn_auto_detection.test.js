@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
+
 import { expect } from 'chai';
+
 import Javascript_yarn from '../src/providers/javascript_yarn.js';
 
 suite('Yarn auto-detection', () => {

@@ -111,15 +111,16 @@ export default class Javascript_yarn extends Base_javascript {
 		const yarnPathKey = 'TRUSTIFY_DA_YARN_PATH';
 		const hasExplicitPath = (yarnPathKey in opts && typeof opts[yarnPathKey] === 'string') ||
 			(yarnPathKey in process.env);
+		const resolvedOpts = { ...opts };
 
 		if (!hasExplicitPath) {
 			const autoPath = this._detectYarnPath(manifestPath);
 			if (autoPath) {
-				process.env[yarnPathKey] = autoPath;
+				resolvedOpts[yarnPathKey] = autoPath;
 			}
 		}
 
-		super._setUp(manifestPath, opts);
+		super._setUp(manifestPath, resolvedOpts);
 
 		const version = this._version() ?? '';
 		const matches = Javascript_yarn.VERSION_PATTERN.exec(version);
