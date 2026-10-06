@@ -28,6 +28,7 @@ export { extractRemediations, maxSeverity } from "./remediation.js";
 export { generateReport, generateDeduplicationKey } from './remediation_report.js'
 export { loadConfig, mergeConfig, resolveConfig, CONFIG_FILENAMES } from './config.js'
 export { runRemediation, findManifests } from './remediate.js'
+/** @typedef {import('./remediate.js').RunRemediationOptions} RunRemediationOptions */
 
 export default { componentAnalysis, stackAnalysis, stackAnalysisBatch, imageAnalysis, validateToken, generateSbom }
 export {

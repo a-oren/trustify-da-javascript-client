@@ -1,11 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import micromatch from 'micromatch'
+import { PackageURL } from 'packageurl-js'
+
 import analysis from './analysis.js'
 import { availableProviders, match } from './provider.js'
 import { extractRemediations } from './remediation.js'
-import { mavenChangeKey, updateMavenVersions } from './updaters/maven_updater.js'
-import { tomlChangeKey, updateTomlVersions } from './updaters/toml_updater.js'
+import { mavenChangeKey, mavenDepsForEditSite, updateMavenVersions } from './updaters/maven_updater.js'
+import { tomlChangeKey, tomlDepsForEditSite, updateTomlVersions } from './updaters/toml_updater.js'
 
 import { selectTrustifyDABackend } from './index.js'
 
@@ -40,7 +43,8 @@ const SKIP_DIRS = new Set(['node_modules', '.git'])
  *   test: (basename: string) => boolean,
  *   updater: (content: string, versionChanges: VersionChangeRequest[]) => UpdaterResult,
  *   label: ('maven'|'toml'),
- *   changeKey: (manifestPath: string, applied: AppliedChange) => string
+ *   changeKey: (manifestPath: string, applied: AppliedChange) => string,
+ *   depsForEditSite: (content: string, manifestPath: string) => Map<string, string[]>
  * }} ManifestType
  */
 
@@ -72,13 +76,15 @@ const MANIFEST_TYPES = [
 		test: (basename) => basename === 'pom.xml',
 		updater: updateMavenVersions,
 		label: 'maven',
-		changeKey: mavenChangeKey
+		changeKey: mavenChangeKey,
+		depsForEditSite: mavenDepsForEditSite
 	},
 	{
 		test: (basename) => basename.endsWith('.versions.toml') || basename === 'libs.versions.toml',
 		updater: updateTomlVersions,
 		label: 'toml',
-		changeKey: tomlChangeKey
+		changeKey: tomlChangeKey,
+		depsForEditSite: tomlDepsForEditSite
 	},
 ]
 
@@ -89,6 +95,66 @@ const MANIFEST_TYPES = [
  */
 function getManifestType(basename) {
 	return MANIFEST_TYPES.find(t => t.test(basename)) || null
+}
+
+/**
+ * Reduces a dependency purl to its canonical, version-less identity for exclude matching:
+ * `pkg:<type>/<namespace>/<name>`, with the type lowercased (purl types are
+ * case-insensitive) and all components percent-decoded by {@link PackageURL} (so an npm
+ * scope compares as `@scope`, not `%40scope`). Returns the raw input unchanged if it
+ * cannot be parsed, so an unparseable purl can still match an identical literal pattern.
+ * @param {string} purl - a full package URL, e.g. `pkg:maven/com.example/legacy-lib@1.0.0`
+ * @returns {string} the canonical version-less purl, e.g. `pkg:maven/com.example/legacy-lib`
+ */
+function canonicalDepPurl(purl) {
+	try {
+		const p = PackageURL.fromString(purl)
+		const namespace = p.namespace ? `${p.namespace}/` : ''
+		return `pkg:${p.type.toLowerCase()}/${namespace}${p.name}`
+	} catch {
+		return purl
+	}
+}
+
+/**
+ * Normalizes an exclude pattern to the same canonical shape as {@link canonicalDepPurl}:
+ * lowercases the `pkg:<type>` segment and percent-decodes each path segment, so a pattern
+ * written as `pkg:NPM/@scope/*` or `pkg:npm/%40scope/*` both match `pkg:npm/@scope/name`.
+ * `*` wildcards are preserved (they are not percent-encoded).
+ * @param {string} pattern
+ * @returns {string}
+ */
+function normalizeExcludePattern(pattern) {
+	const withoutScheme = pattern.replace(/^pkg:/i, '')
+	const slash = withoutScheme.indexOf('/')
+	if (slash === -1) {
+		return `pkg:${withoutScheme.toLowerCase()}`
+	}
+	const type = withoutScheme.slice(0, slash).toLowerCase()
+	const rest = withoutScheme.slice(slash + 1).split('/').map(segment => {
+		try {
+			return decodeURIComponent(segment)
+		} catch {
+			return segment
+		}
+	}).join('/')
+	return `pkg:${type}/${rest}`
+}
+
+/**
+ * Compiles an exclude pattern into a predicate over canonical dep purls, delegating to
+ * micromatch (the same glob engine used for workspace discovery in workspace.js). Patterns
+ * share the `pkg:<type>/<namespace>/<name>` shape and use standard glob semantics: `*` matches
+ * within a `/`-delimited segment (e.g. `pkg:maven/com.example/*` excludes every artifact in that
+ * group) and `**` crosses segments (e.g. `pkg:maven/**` excludes the whole ecosystem). Brace
+ * expansion is therefore available too. A pattern without wildcards is an exact
+ * (normalized) match.
+ * @param {string} pattern
+ * @returns {(canonicalPurl: string) => boolean}
+ */
+function compileExcludeMatcher(pattern) {
+	const normalized = normalizeExcludePattern(pattern)
+	return canonicalPurl => micromatch.isMatch(canonicalPurl, normalized)
 }
 
 /**
@@ -140,11 +206,23 @@ export function findManifests(targetPath) {
 }
 
 /**
+ * Options accepted by {@link runRemediation}. See the per-field docs on the function for details.
+ * @typedef {{
+ *   dryRun?: boolean,
+ *   providers?: string,
+ *   sources?: string,
+ *   backendUrl?: string,
+ *   perDependencyChanges?: boolean,
+ *   exclude?: string[]
+ * }} RunRemediationOptions
+ */
+
+/**
  * Orchestrates the full remediation pipeline for a single manifest or directory:
  * discover manifests → scan via DA backend → extract remediations → apply or preview.
  *
  * @param {string} targetPath - path to a manifest file or directory
- * @param {object} [options]
+ * @param {RunRemediationOptions} [options]
  * @param {boolean} [options.dryRun=false] - preview changes without modifying files (applies by default)
  * @param {string} [options.providers] - comma-separated provider list
  * @param {string} [options.sources] - comma-separated source list
@@ -152,19 +230,31 @@ export function findManifests(targetPath) {
  * @param {boolean} [options.perDependencyChanges=false] - when true, each remediation is populated with
  *   a `changes` array describing the isolated, single-dependency edit (see {@link DependencyFix}). This lets
  *   callers create one commit/PR per dependency without attributing diff hunks themselves.
- * @returns {Promise<{exitCode: number, remediations: AppliedRemediation[], manifests: string[], appliedFiles: string[]}>}
+ * @param {string[]} [options.exclude=[]] - version-less purl glob patterns, e.g. `pkg:maven/com.example/legacy-lib`
+ *   or `pkg:maven/com.example/*` to exclude a group. Matched with micromatch, so standard glob semantics apply:
+ *   `*` matches within a `/`-segment and `**` crosses segments (`pkg:maven/**` excludes the whole ecosystem).
+ *   Matching is against each remediation's canonical, version-less purl: the purl `type` is compared
+ *   case-insensitively and components are percent-decoded, so `pkg:npm/@scope/*` and `pkg:npm/%40scope/*` both
+ *   match `pkg:npm/@scope/x`. Matching remediations are filtered out before being applied or returned. Wired
+ *   from `.trustify-da.yml`'s `remediation.exclude` via the CLI `--exclude` flag.
+ * @returns {Promise<{exitCode: number, remediations: AppliedRemediation[], manifests: string[], appliedFiles: string[], skipped: Array<{groupId: string, artifactId: string, newVersion: string, reason: string}>}>}
  *   exitCode is 2 for a dry-run that found remediations (nothing written), 0 otherwise. `remediations`
  *   is the structured, per-manifest list of applicable updates — each entry carries the originating
  *   manifest path(s) in `files` so callers can group and create per-dependency changes. `appliedFiles`
  *   lists only the manifests actually written to disk (empty on a dry-run), so callers can report a
- *   truthful "updated N files" count without conflating "had remediations" with "was written".
+ *   truthful "updated N files" count without conflating "had remediations" with "was written". `skipped`
+ *   lists remediations that were dropped because they share a version edit site with an excluded dependency.
  */
 export async function runRemediation(targetPath, options = {}) {
-	const { dryRun = false, providers, sources, perDependencyChanges = false, backendUrl } = options
+	const { dryRun = false, providers, sources, perDependencyChanges = false, backendUrl, exclude = [] } = options
+
+	// Compile exclude patterns once up front; each becomes a predicate over a dependency's
+	// canonical, version-less purl (see canonicalDepPurl / compileExcludeMatcher).
+	const excludeMatchers = exclude.map(compileExcludeMatcher)
 
 	const manifestPaths = findManifests(targetPath)
 	if (manifestPaths.length === 0) {
-		return { exitCode: 0, remediations: [], manifests: manifestPaths, appliedFiles: [] }
+		return { exitCode: 0, remediations: [], manifests: manifestPaths, appliedFiles: [], skipped: [] }
 	}
 
 	const opts = {}
@@ -181,6 +271,8 @@ export async function runRemediation(targetPath, options = {}) {
 	const url = selectTrustifyDABackend(opts)
 	const allRemediations = []
 	const appliedFiles = []
+	/** @type {Array<{groupId: string, artifactId: string, newVersion: string, reason: string}>} */
+	const allSkipped = []
 
 	for (const manifestPath of manifestPaths) {
 		const basename = path.basename(manifestPath)
@@ -197,12 +289,68 @@ export async function runRemediation(targetPath, options = {}) {
 		}
 
 		const analysisReport = await analysis.requestStack(provider, manifestPath, url, false, opts)
-		const remediations = extractRemediations(analysisReport, {
+		const extracted = extractRemediations(analysisReport, {
 			providerPriority: providers ? providers.split(',').map(p => p.trim()).filter(Boolean) : undefined,
 		})
 
+		// Drop remediations whose dependency purl matches an exclude pattern, so callers
+		// (and .trustify-da.yml via the CLI) can opt specific dependencies — or whole
+		// groups via `*` wildcards — out of remediation entirely.
+		let remediations = excludeMatchers.length === 0
+			? extracted
+			: extracted.filter(r => {
+				const canonical = canonicalDepPurl(r.purl)
+				return !excludeMatchers.some(matches => matches(canonical))
+			})
+
 		if (remediations.length === 0) {
 			continue
+		}
+
+		const needsContent = excludeMatchers.length > 0 || perDependencyChanges || !dryRun
+		const originalContent = needsContent ? fs.readFileSync(manifestPath, 'utf-8') : null
+
+		// Block retained remediations whose edit site (Maven ${property}, Gradle
+		// version.ref) also contains a dependency matching an exclude pattern —
+		// bumping the shared site would upgrade the excluded dep as a side effect.
+		if (excludeMatchers.length > 0 && originalContent) {
+			const editSiteMap = manifestType.depsForEditSite(originalContent, manifestPath)
+			const kept = []
+			for (const r of remediations) {
+				const result = manifestType.updater(originalContent, [{
+					groupId: r.groupId, artifactId: r.artifactId, newVersion: r.fixedInVersion,
+				}])
+				if (result.applied.length === 0) {
+					kept.push(r)
+					continue
+				}
+				const key = manifestType.changeKey(manifestPath, result.applied[0])
+				// Find any *other* dep at this edit site that matches an exclude pattern.
+				const selfPurl = canonicalDepPurl(r.purl)
+				const coLocated = editSiteMap.get(key) || []
+				const excludedPurl = coLocated.find(purl => {
+					const canonical = canonicalDepPurl(purl)
+					if (canonical === selfPurl) {
+						return false
+					}
+					return excludeMatchers.some(matches => matches(canonical))
+				})
+				if (excludedPurl) {
+					const editType = manifestType.label === 'maven' ? 'Maven property' : 'Gradle version.ref'
+					allSkipped.push({
+						groupId: r.groupId,
+						artifactId: r.artifactId,
+						newVersion: r.fixedInVersion,
+						reason: `Shares a ${editType} with excluded dependency ${canonicalDepPurl(excludedPurl)}`,
+					})
+				} else {
+					kept.push(r)
+				}
+			}
+			remediations = kept
+			if (remediations.length === 0) {
+				continue
+			}
 		}
 
 		// Tag each remediation with the manifest it came from so callers can group
@@ -210,11 +358,6 @@ export async function runRemediation(targetPath, options = {}) {
 		for (const remediation of /** @type {AppliedRemediation[]} */ (remediations)) {
 			remediation.files = [manifestPath]
 		}
-
-		// Read the pristine manifest once. Both the atomic apply and the per-dependency
-		// change computation must diff against the *original* content.
-		const needsContent = perDependencyChanges || !dryRun
-		const originalContent = needsContent ? fs.readFileSync(manifestPath, 'utf-8') : null
 
 		if (perDependencyChanges) {
 			// With per-dependency changes every returned remediation must carry an isolated
@@ -261,9 +404,9 @@ export async function runRemediation(targetPath, options = {}) {
 	}
 
 	if (allRemediations.length === 0) {
-		return { exitCode: 0, remediations: [], manifests: manifestPaths, appliedFiles }
+		return { exitCode: 0, remediations: [], manifests: manifestPaths, appliedFiles, skipped: allSkipped }
 	}
 
 	// Dry-run signals "changes available but not written" via exit code 2.
-	return { exitCode: dryRun ? 2 : 0, remediations: allRemediations, manifests: manifestPaths, appliedFiles }
+	return { exitCode: dryRun ? 2 : 0, remediations: allRemediations, manifests: manifestPaths, appliedFiles, skipped: allSkipped }
 }
