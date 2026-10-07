@@ -16,6 +16,8 @@ export default class Manifest {
 		this.optionalDependencies = content.optionalDependencies || {};
 		this.name = content.name;
 		this.version = content.version || DEFAULT_VERSION;
+		this.packageManager = content.packageManager;
+		this.devEngines = content.devEngines;
 		this.ignored = this.loadIgnored(content);
 	}
 

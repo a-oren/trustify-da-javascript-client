@@ -3,7 +3,10 @@ import path from 'node:path';
 
 import { parseSyml } from '@yarnpkg/parsers';
 
+import { environmentVariableIsPopulated } from '../tools.js';
+
 import Base_javascript, { sriToHash } from './base_javascript.js';
+import Manifest from './manifest.js';
 import Yarn_berry_processor from './processors/yarn_berry_processor.js';
 import Yarn_classic_processor from './processors/yarn_classic_processor.js';
 
@@ -107,9 +110,26 @@ export default class Javascript_yarn extends Base_javascript {
 	}
 
 	_setUp(manifestPath, opts) {
-		super._setUp(manifestPath, opts);
+		const manifest = new Manifest(manifestPath);
+		// Auto-detect Yarn variant only if TRUSTIFY_DA_YARN_PATH is not explicitly set
+		const yarnPathKey = 'TRUSTIFY_DA_YARN_PATH';
+		// An empty opts/env value is treated as unset so auto-detection still runs
+		// (getCustomPath would otherwise reject the empty path).
+		const hasExplicitPath = (typeof opts[yarnPathKey] === 'string' && opts[yarnPathKey] !== '') ||
+			environmentVariableIsPopulated(yarnPathKey);
+		const resolvedOpts = { ...opts };
 
-		const version = this._version() ?? '';
+		if (!hasExplicitPath) {
+			const autoPath = this._detectYarnPath(manifestPath, opts, manifest);
+			if (autoPath) {
+				resolvedOpts[yarnPathKey] = fs.existsSync(autoPath) ? autoPath : this._cmdName();
+			}
+		}
+
+		super._setUp(manifestPath, resolvedOpts, manifest);
+
+		const versionDir = this._findLockFileDir(path.dirname(manifestPath), opts) || path.dirname(manifestPath);
+		const version = this._version({ cwd: versionDir }) ?? '';
 		const matches = Javascript_yarn.VERSION_PATTERN.exec(version);
 
 		if (matches?.length !== 2) {
@@ -119,6 +139,61 @@ export default class Javascript_yarn extends Base_javascript {
 		const isClassic = matches[1] === '1';
 		this._setEcosystem(isClassic ? 'yarn-classic' : 'yarn-berry');
 		this.#processor = isClassic ? new Yarn_classic_processor(this._getManifest()) : new Yarn_berry_processor(this._getManifest());
+	}
+
+	/**
+	 * Detects the correct Yarn binary path based on project manifest signals.
+	 * Uses the same workspace lock file lookup as dependency analysis.
+	 * Uses the container's Corepack shim for project declarations, falling back to PATH during setup.
+	 * Otherwise checks .yarnrc.yml and the lockfile format before defaulting to Classic.
+	 * @param {string} manifestPath - Path to package.json
+	 * @param {Object} [opts={}] - Options, including TRUSTIFY_DA_WORKSPACE_DIR
+	 * @param {Manifest} [manifest] - Manifest already loaded during setup
+	 * @returns {string|null} Yarn command name or absolute binary path, or null if not a Yarn project
+	 * @private
+	 */
+	_detectYarnPath(manifestPath, opts = {}, manifest) {
+		const manifestName = path.basename(manifestPath);
+
+		// Only detect for Yarn projects (package.json + a reachable yarn.lock)
+		if (manifestName !== 'package.json') {
+			return null;
+		}
+		const manifestDir = this._findLockFileDir(path.dirname(manifestPath), opts);
+		if (!manifestDir) {
+			return null;
+		}
+
+		// Let Corepack resolve project declarations instead of forcing a bundled version.
+		try {
+			const rootManifestPath = path.join(manifestDir, 'package.json');
+			const rootManifest = manifest && path.resolve(manifest.manifestPath) === rootManifestPath
+				? manifest
+				: JSON.parse(fs.readFileSync(rootManifestPath, 'utf-8'));
+			const packageManager = rootManifest.packageManager;
+			const devPackageManager = rootManifest.devEngines?.packageManager;
+
+			// The top-level declaration takes precedence; non-Yarn declarations prevent guessing.
+			if (packageManager != null || devPackageManager != null) {
+				const isYarn = packageManager != null
+					? typeof packageManager === 'string' && packageManager.startsWith('yarn@')
+					: devPackageManager.name === 'yarn';
+				// An absolute shim prevents node_modules/.bin/yarn from shadowing Corepack.
+				return isYarn ? '/usr/local/corepack/bin/yarn' : null;
+			}
+		} catch (err) {
+			// If we can't read package.json, fall through to file-based detection
+		}
+
+		// Berry's rc file is optional; its lockfile contains a __metadata entry.
+		const yarnrcPath = path.join(manifestDir, '.yarnrc.yml');
+		if (fs.existsSync(yarnrcPath) ||
+			parseSyml(fs.readFileSync(path.join(manifestDir, this._lockFileName()), 'utf-8')).__metadata) {
+			return '/usr/local/bin/yarn-berry';
+		}
+
+		// Default to Classic for bare v1 yarn.lock
+		return '/usr/local/bin/yarn-classic';
 	}
 
 	_getRootDependencies(depTree) {
