@@ -242,6 +242,38 @@ suite('read-only JavaScript lockfile analysis', () => {
 			expect(result(test, method).components.map(component => component.purl)).to.deep.equal(['pkg:npm/alpha@2.0.0']);
 		});
 
+		test(`pnpm ${method} rejects a locked resolution that drifted outside the declared range`, () => {
+			// Given an importer whose specifier still matches the manifest but whose
+			// locked version falls outside that range
+			const test = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '^1.0.0' } },
+				{ alpha: { version: '2.0.0' } });
+
+			// When the graph resolves the edge
+			// Then it is rejected with an actionable staleness error rather than
+			// entering the SBOM with the wrong version
+			expect(test.lock.importers['.'].dependencies.alpha).to.deep.equal({ specifier: '^1.0.0', version: '2.0.0' });
+			expect(() => result(test, method)).to.throw(/Lockfile is out of date.*alpha requires \^1\.0\.0 but resolves to 2\.0\.0/);
+		});
+
+		test(`pnpm ${method} accepts in-range and overridden resolutions within the effective range`, () => {
+			// Given an in-range resolution (1.5.0 satisfies ^1.0.0)
+			const inRange = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '^1.0.0' } },
+				{ alpha: { version: '1.5.0' } });
+
+			// Then it resolves unchanged
+			expect(result(inRange, method).components.map(component => component.purl)).to.deep.equal(['pkg:npm/alpha@1.5.0']);
+
+			// Given an overridden resolution whose effective range is the override value
+			const overridden = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '^1.0.0' }, pnpm: { overrides: { alpha: '2.0.0' } } },
+				{ alpha: { version: '2.0.0' } });
+			overridden.lock.overrides = { alpha: '2.0.0' };
+			overridden.lock.importers['.'].dependencies.alpha.specifier = '2.0.0';
+			fs.writeFileSync(overridden.lockPath, JSON.stringify(overridden.lock));
+
+			// Then the version satisfying the override still resolves unchanged
+			expect(result(overridden, method).components.map(component => component.purl)).to.deep.equal(['pkg:npm/alpha@2.0.0']);
+		});
+
 		for (const catalog of ['', 'versions']) {
 			test(`pnpm ${method} resolves overrides from the ${catalog || 'default'} catalog`, () => {
 				const test = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '^1.0.0' }, pnpm: { overrides: { alpha: `catalog:${catalog}` } } },

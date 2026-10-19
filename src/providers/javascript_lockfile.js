@@ -667,7 +667,10 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 
 	// Resolves a dependency edge to a node id, following workspace `link:` edges
 	// to importers. Returns undefined when an optional dependency is absent.
-	function resolve(ownerLocation, name, version, source, optional) {
+	// `range` is the importer's recorded specifier (already validated to equal the
+	// effective, override-applied manifest declaration); it is undefined for
+	// transitive snapshot edges, which carry no declared range in the lockfile.
+	function resolve(ownerLocation, name, version, source, optional, range) {
 		if (version.startsWith('link:')) {
 			const location = path.relative(root, path.resolve(root, ownerLocation, version.slice(5))).split(path.sep).join('/') || '.';
 			if (locals.has(location) || object(importers[location])) { return `importer:${location}`; }
@@ -678,6 +681,11 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 			if (optional) { return undefined; }
 			stale(source, name, 'has no locked resolution');
 		}
+		// A matching importer specifier does not guarantee the locked resolution stayed
+		// within range; reject a concrete version that drifted outside it. identity()
+		// strips any peer suffix and resolves aliases, so the check uses the real
+		// package version, not the suffix-bearing node id.
+		if (range != null) { validateRange(source, name, range, identity(id)); }
 		return id;
 	}
 
@@ -691,7 +699,7 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 			for (const [name, entry] of Object.entries(group)) {
 				const version = typeof entry === 'string' ? entry : entry?.version;
 				if (typeof version !== 'string' || !version) { unsupported(source, name, 'missing resolved version'); }
-				out.push([name, version, optional]);
+				out.push([name, version, optional, typeof entry === 'string' ? undefined : entry?.specifier]);
 			}
 		}
 		return out;
@@ -723,8 +731,8 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 				const node = { name: local.data.name ?? location, version: local.data.version ?? 'v0.0.0', dependencies: new Map(), hashes: undefined };
 				graph.nodes.set(id, node);
 				const importer = importers[location];
-				for (const [name, version, optional] of edges([[importer.dependencies, false], [importer.optionalDependencies, true]], source)) {
-					const childNodeId = resolve(location, name, version, source, optional);
+				for (const [name, version, optional, specifier] of edges([[importer.dependencies, false], [importer.optionalDependencies, true]], source)) {
+					const childNodeId = resolve(location, name, version, source, optional, specifier);
 					if (childNodeId == null) { continue; }
 					node.dependencies.set(name, childNodeId);
 					children.push(childNodeId);
