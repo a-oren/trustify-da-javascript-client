@@ -334,6 +334,27 @@ suite('read-only JavaScript lockfile analysis', () => {
 			expect(snapshot(root)).to.deep.equal(before);
 		});
 
+		/** Verifies a very deep acyclic pnpm chain is analyzed iteratively without a RangeError stack overflow. */
+		test(`pnpm ${method} analyzes a very deep acyclic dependency chain without a stack overflow`, function () {
+			this.timeout(30000); // building and traversing a 15k-deep chain is well past the 2s default
+			// Given a lockfile whose dependency chain is far deeper than the JS call stack
+			const depth = 15000;
+			const packages = {};
+			for (let i = 0; i < depth; i++) {
+				packages[`dep${i}`] = { version: '1.0.0', ...(i < depth - 1 ? { dependencies: { [`dep${i + 1}`]: '^1.0.0' } } : {}) };
+			}
+			const test = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { dep0: '^1.0.0' } }, packages);
+
+			// When analyzing the manifest (a recursive walk would throw RangeError here)
+			const sbom = result(test, method);
+
+			// Then the chain is traversed and the SBOM is produced
+			expect(sbom.components.some(component => component.purl === 'pkg:npm/dep0@1.0.0')).to.be.true;
+			if (method === 'provideStack') {
+				expect(sbom.components.some(component => component.purl === `pkg:npm/dep${depth - 1}@1.0.0`)).to.be.true;
+			}
+		});
+
 		test(`pnpm ${method} rejects a stale linked workspace manifest`, () => {
 			const test = pnpmWorkspaceFixture();
 			test.lib.dependencies.alpha = '^2.0.0';

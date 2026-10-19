@@ -697,39 +697,51 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 		return out;
 	}
 
-	function visit(id) {
-		if (graph.nodes.has(id)) { return; }
-		if (id.startsWith('importer:')) {
-			const location = id.slice('importer:'.length);
-			let local = locals.get(location);
-			if (!local) {
-				const manifestFile = path.resolve(root, location, 'package.json');
-				const data = readJson(manifestFile);
-				validatePnpmImporter(manifestFile, data, importers[location], file, override);
-				local = { data, file: manifestFile };
-				locals.set(location, local);
+	// Iterative depth-first traversal with an explicit work stack. A recursive walk
+	// overflows the call stack on a deep, acyclic dependency chain from an untrusted
+	// lockfile (RangeError); an explicit stack bounds traversal by heap, not stack depth.
+	// Nodes are created in the same pre-order as the recursive walk, and child ids are
+	// pushed in reverse so they pop left-to-right, keeping graph.nodes insertion order
+	// and node.dependencies order byte-identical to the previous implementation.
+	function visit(rootId) {
+		const stack = [rootId];
+		while (stack.length > 0) {
+			const id = stack.pop();
+			if (graph.nodes.has(id)) { continue; }
+			const children = [];
+			if (id.startsWith('importer:')) {
+				const location = id.slice('importer:'.length);
+				let local = locals.get(location);
+				if (!local) {
+					const manifestFile = path.resolve(root, location, 'package.json');
+					const data = readJson(manifestFile);
+					validatePnpmImporter(manifestFile, data, importers[location], file, override);
+					local = { data, file: manifestFile };
+					locals.set(location, local);
+				}
+				const source = local.file;
+				const node = { name: local.data.name ?? location, version: local.data.version ?? 'v0.0.0', dependencies: new Map(), hashes: undefined };
+				graph.nodes.set(id, node);
+				const importer = importers[location];
+				for (const [name, version, optional] of edges([[importer.dependencies, false], [importer.optionalDependencies, true]], source)) {
+					const childNodeId = resolve(location, name, version, source, optional);
+					if (childNodeId == null) { continue; }
+					node.dependencies.set(name, childNodeId);
+					children.push(childNodeId);
+				}
+			} else {
+				const { name, version } = identity(id);
+				const node = { name, version, dependencies: new Map(), hashes: hashes({ integrity: packageEntry(id)?.resolution?.integrity }) };
+				graph.nodes.set(id, node);
+				const snapshot = snapshots[id];
+				for (const [depName, depVersion, optional] of edges([[snapshot?.dependencies, false], [snapshot?.optionalDependencies, true]], file)) {
+					const childNodeId = resolve('.', depName, depVersion, file, optional);
+					if (childNodeId == null) { continue; }
+					node.dependencies.set(depName, childNodeId);
+					children.push(childNodeId);
+				}
 			}
-			const source = local.file;
-			const node = { name: local.data.name ?? location, version: local.data.version ?? 'v0.0.0', dependencies: new Map(), hashes: undefined };
-			graph.nodes.set(id, node);
-			const importer = importers[location];
-			for (const [name, version, optional] of edges([[importer.dependencies, false], [importer.optionalDependencies, true]], source)) {
-				const childNodeId = resolve(location, name, version, source, optional);
-				if (childNodeId == null) { continue; }
-				visit(childNodeId);
-				node.dependencies.set(name, childNodeId);
-			}
-			return;
-		}
-		const { name, version } = identity(id);
-		const node = { name, version, dependencies: new Map(), hashes: hashes({ integrity: packageEntry(id)?.resolution?.integrity }) };
-		graph.nodes.set(id, node);
-		const snapshot = snapshots[id];
-		for (const [depName, depVersion, optional] of edges([[snapshot?.dependencies, false], [snapshot?.optionalDependencies, true]], file)) {
-			const childNodeId = resolve('.', depName, depVersion, file, optional);
-			if (childNodeId == null) { continue; }
-			visit(childNodeId);
-			node.dependencies.set(depName, childNodeId);
+			for (let i = children.length - 1; i >= 0; i--) { stack.push(children[i]); }
 		}
 	}
 
