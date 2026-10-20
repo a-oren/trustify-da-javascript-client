@@ -212,6 +212,7 @@ suite('read-only JavaScript lockfile analysis', () => {
 			{ label: 'unrelated parent version', overrides: { 'app@^3.0.0>alpha': '2.0.0' }, specifier: '^1.0.0' },
 			{ label: 'parent precedence', overrides: { alpha: '3.0.0', 'app>alpha': '2.0.0' } },
 			{ label: 'intersecting selector precedence', overrides: { 'alpha@^1.0.0': '2.0.0', alpha: '3.0.0' }, specifier: '3.0.0' },
+			{ label: 'reversed intersecting selector precedence', overrides: { alpha: '3.0.0', 'alpha@^1.0.0': '2.0.0' } },
 		]) {
 			test(`pnpm ${method} applies ${label} overrides without accepting unrelated declaration changes`, () => {
 				const version = specifier === '^1.0.0' ? '1.0.0' : specifier;
@@ -230,6 +231,26 @@ suite('read-only JavaScript lockfile analysis', () => {
 				expect(() => result(test, method)).to.throw(/Lockfile is out of date.*alpha/);
 			});
 		}
+
+		/**
+		 * Verifies pnpm's last-matching-rule precedence when several override
+		 * selectors — including a disjoint one — all match a broad dependency range.
+		 * The last declared matching rule must win regardless of range intersection.
+		 */
+		test(`pnpm ${method} applies the last matching override across selectors on a broad range`, () => {
+			// Given a broad dependency range matched by three override selectors in
+			// declaration order, including one (^5.0.0) disjoint from the first
+			const overrides = { 'alpha@^1.0.0': '2.0.0', 'alpha@^5.0.0': '6.0.0', 'alpha@>=2.0.0': '4.0.0' };
+			const test = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '>=1.0.0' }, pnpm: { overrides } },
+				{ alpha: { version: '4.0.0' } });
+			test.lock.overrides = overrides;
+			test.lock.importers['.'].dependencies.alpha.specifier = '4.0.0';
+			fs.writeFileSync(test.lockPath, JSON.stringify(test.lock));
+
+			// When the graph resolves the overridden dependency
+			// Then the last declared matching override (4.0.0) wins, not an earlier match
+			expect(result(test, method).components.map(component => component.purl)).to.deep.equal(['pkg:npm/alpha@4.0.0']);
+		});
 
 		test(`pnpm ${method} resolves override references to root dependency declarations`, () => {
 			const test = fixture('pnpm', { name: 'app', version: '1.0.0', dependencies: { alpha: '^1.0.0' },

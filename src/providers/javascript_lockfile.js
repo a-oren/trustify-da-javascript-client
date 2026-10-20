@@ -522,9 +522,11 @@ function pnpmOverrides(root, rootData, lock, file) {
 	const resolved = {};
 	const selector = value => value.includes('@', 1) ? descriptor(value) : { name: value, range: undefined };
 	const rules = Object.entries(configured).map(([key, value]) => {
+		// Split parent>dependency selectors without mistaking a version range's > for the separator.
 		const delimiter = key.search(/[^ |@]>/) + 1;
 		const target = selector(delimiter ? key.slice(delimiter + 1) : key);
 		const parent = delimiter ? selector(key.slice(0, delimiter)) : undefined;
+		// pnpm records the values of dependency references and catalogs, not their reference syntax.
 		if (value.startsWith('$')) { value = manifestDependencies(rootData, rootFile, true)[value.slice(1)]; }
 		if (value?.startsWith('catalog:')) {
 			const catalog = value.slice(8) ? workspace.catalogs?.[value.slice(8)] : workspace.catalog;
@@ -534,16 +536,19 @@ function pnpmOverrides(root, rootData, lock, file) {
 		resolved[key] = value;
 		return { parent, target, value };
 	});
+	// Different overrides mean the locked versions were selected under different resolution rules.
 	if (!isDeepStrictEqual(resolved, lock.overrides ?? {})) { stale(file, 'overrides', 'have different declarations'); }
 	const intersects = (range, spec) => !range || range === spec || (semver.validRange(range) && semver.validRange(spec) && semver.intersects(range, spec));
 	return (data, manifestFile, name, spec) => {
 		let matches = rules.filter(rule => rule.target.name === name && intersects(rule.target.range, spec) &&
 			(!rule.parent || (rule.parent.name === data.name && (!rule.parent.range || semver.satisfies(data.version, rule.parent.range)))));
+		// Parent-qualified rules take precedence over dependency-only rules.
 		const parentMatches = matches.filter(rule => rule.parent);
 		if (parentMatches.length) { matches = parentMatches; }
-		// Intersecting selectors use pnpm's last-match precedence.
-		matches.sort((a, b) => intersects(b.target.range, a.target.range ?? '') ? -1 : 1);
-		const value = matches[0]?.value;
+		// pnpm applies the last matching override in declaration order; rules (and the
+		// filtered matches) preserve that order, so take the last match directly.
+		const value = matches.at(-1)?.value;
+		// Local override paths start at the workspace root; importer specifiers start at their manifest.
 		const local = /^(file:|link:)(.*)$/.exec(value ?? '');
 		return local && !path.isAbsolute(local[2])
 			? `${local[1]}${path.relative(path.dirname(manifestFile), path.resolve(root, local[2])).split(path.sep).join('/')}`
@@ -551,17 +556,9 @@ function pnpmOverrides(root, rootData, lock, file) {
 	};
 }
 
-/**
- * Validates importer declarations against package.json with root overrides applied.
- * Every recorded specifier must match the manifest's declaration for that name in
- * any dependency section, and every required `dependencies`/`devDependencies`
- * entry must be recorded in its effective section. pnpm promotes declared peer
- * dependencies into the importer's `dependencies` under `autoInstallPeers`, so
- * recorded specifiers are matched against the union of all manifest sections.
- * Declared-only peer/optional dependencies (absent from the lockfile) are
- * supplemented from the manifest and are not required here.
- */
+/** Validates manifest declarations against pnpm's importer (the project's lockfile entry). */
 function validatePnpmImporter(manifestFile, data, importer, file, override) {
+	// pnpm can auto-install peers as dependencies, so compare declarations across all sections.
 	const declared = {
 		...dependencyMap(data, 'peerDependencies', manifestFile),
 		...dependencyMap(data, 'devDependencies', manifestFile),
@@ -575,6 +572,7 @@ function validatePnpmImporter(manifestFile, data, importer, file, override) {
 	};
 	for (const [name, specifier] of Object.entries(recorded)) {
 		if (declared[name] != null && (override(data, manifestFile, name, declared[name]) ?? declared[name]) !== specifier) {
+			// The lockfile was generated from a different dependency declaration, including any override.
 			stale(manifestFile, name, 'has a different dependency declaration');
 		}
 	}
@@ -583,7 +581,9 @@ function validatePnpmImporter(manifestFile, data, importer, file, override) {
 			// Optional declarations override production declarations, which override development declarations.
 			if (Object.hasOwn(data.optionalDependencies ?? {}, name) ||
 				(section === 'devDependencies' && Object.hasOwn(data.dependencies ?? {}, name))) { continue; }
+			// A '-' override removes the dependency, so pnpm need not record it.
 			if (override(data, manifestFile, name, spec) === '-') { continue; }
+			// Missing or moved required dependencies need a lockfile update.
 			if (!Object.hasOwn(importer[section] ?? {}, name)) { stale(manifestFile, name, `has a different ${section} declaration`); }
 		}
 	}
@@ -618,6 +618,7 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 	for (const [manifestFile, data] of manifests) {
 		const location = path.relative(root, path.dirname(manifestFile)).split(path.sep).join('/') || '.';
 		const importer = importers[location];
+		// Without an importer, the lockfile has no dependency declarations for this project.
 		if (!object(importer)) { stale(manifestFile, data.name, 'is missing from the lockfile'); }
 		validatePnpmImporter(manifestFile, data, importer, file, override);
 		locals.set(location, { data, file: manifestFile });
@@ -639,6 +640,7 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 	}
 
 	function packageEntry(id) {
+		// v9 shares package metadata across peer contexts, but keeps their dependency snapshots separate.
 		return major === 6 ? packages[id] : packages[id.split('(')[0]];
 	}
 
@@ -679,12 +681,10 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 		const id = childId(name, version);
 		if (!object(snapshots[id])) {
 			if (optional) { return undefined; }
+			// A required edge points to a missing snapshot, so the locked graph is incomplete.
 			stale(source, name, 'has no locked resolution');
 		}
-		// A matching importer specifier does not guarantee the locked resolution stayed
-		// within range; reject a concrete version that drifted outside it. identity()
-		// strips any peer suffix and resolves aliases, so the check uses the real
-		// package version, not the suffix-bearing node id.
+		// Even if declarations match, the resolved package's real version must still satisfy the range.
 		if (range != null) { validateRange(source, name, range, identity(id)); }
 		return id;
 	}
@@ -705,12 +705,7 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 		return out;
 	}
 
-	// Iterative depth-first traversal with an explicit work stack. A recursive walk
-	// overflows the call stack on a deep, acyclic dependency chain from an untrusted
-	// lockfile (RangeError); an explicit stack bounds traversal by heap, not stack depth.
-	// Nodes are created in the same pre-order as the recursive walk, and child ids are
-	// pushed in reverse so they pop left-to-right, keeping graph.nodes insertion order
-	// and node.dependencies order byte-identical to the previous implementation.
+	// An explicit stack avoids call-stack overflow on deep dependency chains.
 	function visit(rootId) {
 		const stack = [rootId];
 		while (stack.length > 0) {
@@ -749,6 +744,7 @@ export function readPnpmGraph(root, manifestPath, manifest, lock) {
 					children.push(childNodeId);
 				}
 			}
+			// Push in reverse to visit dependencies in their original declaration order.
 			for (let i = children.length - 1; i >= 0; i--) { stack.push(children[i]); }
 		}
 	}
